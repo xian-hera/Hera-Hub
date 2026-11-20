@@ -60,6 +60,11 @@ const HairdresserList = lazyWithReload(() => import(/* webpackChunkName: "crm" *
 const HairdresserDetail = lazyWithReload(() => import(/* webpackChunkName: "crm" */ './pages/crm/HairdresserDetail'));
 const SettleCommissions = lazyWithReload(() => import(/* webpackChunkName: "crm" */ './pages/crm/SettleCommissions'));
 const EmployeeCap = lazyWithReload(() => import(/* webpackChunkName: "crm" */ './pages/crm/EmployeeCap'));
+// Operation › Cash Payments (2026-11-19, Hera — claude/CASH_PAYMENTS_SPEC.md)
+const CashPaymentsShell = lazyWithReload(() => import(/* webpackChunkName: "crm" */ './pages/crm/cashPayments/CashPaymentsShell'));
+const CashCollect = lazyWithReload(() => import(/* webpackChunkName: "crm" */ './pages/crm/cashPayments/CashCollect'));
+const CashAudit = lazyWithReload(() => import(/* webpackChunkName: "crm" */ './pages/crm/cashPayments/CashAudit'));
+const CashSettings = lazyWithReload(() => import(/* webpackChunkName: "crm" */ './pages/crm/cashPayments/CashSettings'));
 // Online — new section split out of CRM/Growth (2026-09-21, Hera): Birthday
 // Reward + Influencer Management, moved here from ./pages/crm, gated by
 // their own online_pin instead of crm_pin. See pages/online/OnlineHome.js.
@@ -245,6 +250,9 @@ function App() {
           <Route path="/crm/hairdressers/settle-commissions" element={<SettleCommissions />} />
           <Route path="/crm/hairdressers/:id" element={<HairdresserDetail />} />
           <Route path="/crm/employee-cap" element={<EmployeeCap />} />
+          <Route path="/crm/cash-payments" element={<CashPaymentsShell tab="collect">{(p) => <CashCollect {...p} />}</CashPaymentsShell>} />
+          <Route path="/crm/cash-payments/audit" element={<CashPaymentsShell tab="audit">{(p) => <CashAudit {...p} />}</CashPaymentsShell>} />
+          <Route path="/crm/cash-payments/settings" element={<CashPaymentsShell tab="settings">{(p) => <CashSettings {...p} />}</CashPaymentsShell>} />
 
           {/* Online — new section split out of CRM/Growth (2026-09-21, Hera) */}
           {/* Online tabs (2026-10-01): OnlineHome = PIN gate + header + tab bar around each tab page */}

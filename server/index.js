@@ -12,6 +12,7 @@ const { startSyncScheduler } = require('./jobs/syncVariantIndex');
 const { startNewArrivalScheduler } = require('./jobs/newArrivalScheduler');
 const { startOnlineTaskHistoryScheduler } = require('./jobs/onlineTaskHistory'); // Online Dashboard, 2026-10-01
 const { startPriceChangeScheduler } = require('./jobs/priceChangeScheduler'); // Price Change schedule / reverse, 2026-10-08
+const { startCashPaymentsScheduler } = require('./jobs/cashPaymentsScheduler'); // Operation › Cash Payments, 2026-11-19
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -61,6 +62,7 @@ app.use('/api/account-memory', require('./routes/accountMemory').router);
 // Purchasing user groups (2026-10-09) — see routes/userGroups.js
 app.use('/api/user-groups', require('./routes/userGroups'));
 app.use('/api/employees', require('./routes/employees'));
+app.use('/api/cash-payments', require('./routes/cashPayments')); // Operation › Cash Payments, 2026-11-19
 app.use('/api/po-suppliers', require('./routes/poSuppliers'));
 app.use('/api/po-invoices', require('./routes/poInvoices'));
 app.use('/api/po-settings', require('./routes/poSettings'));
@@ -132,6 +134,7 @@ const startServer = async () => {
     startNewArrivalScheduler();
     startOnlineTaskHistoryScheduler();
     startPriceChangeScheduler();
+    startCashPaymentsScheduler();
     app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
       console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);

@@ -2003,6 +2003,9 @@ const initDatabase = async () => {
     // Transfer History rows keep tags / source (2026-11-09) — see database/historyTransferSnapshot.js.
     await require('./historyTransferSnapshot').backfillHistoryTransferSnapshot(client);
 
+    // Operation › Cash Payments tables (2026-11-19, Hera) — see database/cashPaymentsSchema.js.
+    await require('./cashPaymentsSchema').ensureCashPaymentsTables(client);
+
     await client.query('COMMIT');
     console.log('✓ Database initialized successfully');
   } catch (e) {

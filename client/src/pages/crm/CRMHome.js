@@ -83,6 +83,10 @@ function CRMHome() {
               <Button size="large" fullWidth onClick={() => navigate('/crm/employee-cap')}>
                 Employee Cap
               </Button>
+              {/* Cash Payments (2026-11-19, Hera) — envelope cash vs Shopify, see claude/CASH_PAYMENTS_SPEC.md */}
+              <Button size="large" fullWidth onClick={() => navigate('/crm/cash-payments')}>
+                Cash Payments
+              </Button>
             </BlockStack>
           </Layout.Section>
         </Layout>
