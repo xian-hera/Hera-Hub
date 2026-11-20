@@ -119,6 +119,7 @@ export default function CashAudit({ settings, locations }) {
                   rows={(data && data.rows) || []}
                   currentYear={year}
                   showLocation
+                  center
                   onSaveNote={saveNote}
                   emptyText={selected.length === 0 ? 'Choose at least one location.' : 'Nothing in this range.'}
                 />

@@ -145,6 +145,7 @@ export default function CashCollect({ settings, locations }) {
                     rows={shown}
                     currentYear={Number(settings.today.slice(0, 4))}
                     editable
+                    center
                     onSaveAmount={saveAmount}
                     onSaveNote={saveNote}
                     emptyText={rows.length === 0 ? 'No days in this range yet.' : 'No days with this status.'}

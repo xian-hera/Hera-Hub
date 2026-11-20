@@ -206,18 +206,20 @@ export default function CashSettings({ settings, allLocations, reloadSettings, l
             {groups.length === 0 && <Text tone="subdued">No groups yet.</Text>}
             {groups.map(g => (
               <div key={g.id} style={{ border: '1px solid #e1e3e5', borderRadius: 10, padding: '10px 12px' }}>
-                <InlineStack align="space-between" blockAlign="center" gap="300" wrap={false}>
-                  <BlockStack gap="150">
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  {/* Pills wrap onto new lines left-aligned (2026-11-20: a wrapped
+                      pill used to land on the right). */}
+                  <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start' }}>
                     <Text fontWeight="semibold">{g.name}</Text>
-                    <InlineStack gap="100" wrap>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-start', gap: 4 }}>
                       {g.locations.map(l => <LocPill key={l} name={l} />)}
-                    </InlineStack>
-                  </BlockStack>
+                    </div>
+                  </div>
                   <InlineStack gap="200" wrap={false}>
                     <Button size="slim" onClick={() => setEditing(g)}>Edit</Button>
                     <Button size="slim" tone="critical" variant="plain" onClick={() => del(g)}>Delete</Button>
                   </InlineStack>
-                </InlineStack>
+                </div>
               </div>
             ))}
           </BlockStack>
