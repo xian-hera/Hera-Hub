@@ -1,10 +1,12 @@
 // Operation › Cash Payments (2026-11-19, Hera — claude/CASH_PAYMENTS_SPEC.md).
 // Mounted at /api/cash-payments.
 //
-// Every store puts the day's cash (minus the float) in an envelope with the
-// amount written on it. Once a week the finance person collects the envelopes
-// and enters, per day, Declared (written on the envelope) and Counted (what
-// she counted). System = Shopify cash net payments (services/cashPayments.js).
+// Every store puts the day's cash (minus the float) in an envelope. Once a
+// week finance collects the envelopes and enters, per location per day,
+// Counted (what she counted) and, optionally, Receipted removed (removed cash
+// backed by receipts). Expected / Removed come from the POS drawers
+// (services/cashPayments.js). Make Deposit locks days into a deposit.
+// (2026-11-20: System / Declared / Save & Archive replaced — Hera.)
 //
 //   GET    /settings            starting date, groups, today / yesterday (Toronto)
 //   PUT    /starting-date       { date } → saves, then fetches missing days
@@ -13,17 +15,21 @@
 //   PUT    /groups/:id          { name, locations }
 //   DELETE /groups/:id
 //   GET    /groups/my           → { identified, groupId } (0 = Admin, null = not chosen)
-//   PUT    /groups/my           { groupId }
+//   PUT    /groups/my           { groupId, pin? } — Admin needs the Admin password
 //   DELETE /groups/my           Log out: forget this account's group
-//   GET    /rows                ?locations=A,B&from&to&filter&sort&page&pageSize
-//   PUT    /row                 { location, date, declared?, counted? } (amount strings / null)
+//   PUT    /admin-pin           { pin } — set / change the Admin password
+//   GET    /rows                ?locations=A,B&from&to&filter&sort&page&pageSize&drawers=1
+//   PUT    /row                 { location, date, counted?, receipted? } (amount strings / null)
 //   PUT    /note                { location, date, note } ('' = delete)
-//   POST   /archive             { location, from, to }
+//   POST   /deposits            { location, dates: [...], note? } — Make Deposit
+//   GET    /deposits            ?locations=A,B&from&to — deposits holding a day in the range
+//   PUT    /deposits/:id/note   { note }
 //
 // Like accountMemory.js, the /groups/my routes never answer 401: no account →
 // { identified: false } and the page falls back to localStorage.
 
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
 const { pool } = require('../database/init');
 const { getAccountId } = require('../accountAuth');
@@ -83,59 +89,63 @@ function parseAmount(v) {
   return cents;
 }
 
-// The three differences; null when one side is missing.
-function diffsOf(r) {
-  const s = Number(r.system_cents);
-  const d = r.declared_cents === null ? null : Number(r.declared_cents);
-  const c = r.counted_cents === null ? null : Number(r.counted_cents);
-  return {
-    declaredVsSystem: d === null ? null : d - s,
-    countedVsDeclared: d === null || c === null ? null : c - d,
-    countedVsSystem: c === null ? null : c - s,
-  };
-}
-
-// Row → what the page needs. Status rules (Hera):
-//   noCash   System 0 → grey row, nothing to enter, never Pending
-//   pending  Declared or Counted missing
-//   matched  all three differences 0
-//   mismatch at least one difference
-//   archived after Save & Archive (shown instead of the above)
-// Filter pills: Collected = both entered; Mismatch = entered and at least one
-// difference (archived rows included — Audit can still find them); Pending =
-// not complete; Archived = archived.
+// Row → what the page needs (2026-11-20, drawer-based — Hera):
+//   expected  Σ drawers (Ending − cash at open)    removed  Σ cash removed
+//   diff         = Counted − Expected
+//   removedDiff  = Receipted removed − Removed (only when Receipted is entered;
+//                  empty Receipted means Removed is fine)
+// Status:
+//   deposited  in a deposit (Make Deposit) — shown instead of the others
+//   nocash     Expected 0 and Removed 0 → grey row, nothing to enter
+//   pending    Counted missing
+//   matched    diff 0 and removedDiff 0 / empty
+//   mismatch   otherwise
+// Filter pills (one day = one row, drawers not counted separately):
+// Collected = Counted entered; Pending; Mismatch = entered with a difference
+// (deposited included); Deposited; Not deposited yet = not in a deposit.
+const num = (v) => (v === null || v === undefined ? null : Number(v));
 function shapeRow(r) {
-  const system = Number(r.system_cents);
-  const declared = r.declared_cents === null ? null : Number(r.declared_cents);
-  const counted = r.counted_cents === null ? null : Number(r.counted_cents);
-  const diffs = diffsOf(r);
-  const noCash = system === 0;
-  const collected = declared !== null && counted !== null;
-  const mismatch = collected && (diffs.declaredVsSystem !== 0 || diffs.countedVsDeclared !== 0 || diffs.countedVsSystem !== 0);
-  const archived = !!r.archived_at;
-  const pending = !archived && !noCash && !collected;
+  const expected = Number(r.expected_cents || 0);
+  const removed = Number(r.removed_cents || 0);
+  const counted = num(r.counted_cents);
+  const receipted = num(r.receipted_cents);
+  const diff = counted === null ? null : counted - expected;
+  const removedDiff = receipted === null ? null : receipted - removed;
+  const noCash = expected === 0 && removed === 0;
+  const collected = counted !== null;
+  const mismatch = collected && (diff !== 0 || (removedDiff !== null && removedDiff !== 0));
+  const deposited = r.deposit_id !== null && r.deposit_id !== undefined;
+  const pending = !deposited && !noCash && !collected;
   let status = 'pending';
-  if (archived) status = 'archived';
+  if (deposited) status = 'deposited';
   else if (noCash && !collected) status = 'nocash';
   else if (collected) status = mismatch ? 'mismatch' : 'matched';
-  // Unrounded Shopify amount, only when it differs from System (rounded).
-  const unrounded = r.unrounded_cents === null || r.unrounded_cents === undefined ? null : Number(r.unrounded_cents);
   return {
     location: r.location,
     date: r.d,
-    system,
-    systemUnrounded: unrounded !== null && unrounded !== system ? unrounded : null,
-    declared,
+    expected,
+    removed,
     counted,
-    diffs,
+    receipted,
+    diff,
+    removedDiff,
     note: r.note || '',
-    archived,
-    archivedAt: r.archived_at,
+    depositId: deposited ? Number(r.deposit_id) : null,
+    depositedAt: r.deposited_at || null,
+    deposit: r.deposit_title || null,
     noCash,
     status,
-    flags: { collected, pending, mismatch, archived },
+    flags: { collected, pending, mismatch, deposited, notdeposited: !deposited },
   };
 }
+
+// Deposit title: base + "-A", "-B"… when the base is used more than once in a year.
+const depositTitle = (d) => (d.suffix ? `${d.title_base}-${d.suffix}` : d.title_base);
+const ROW_SELECT = `SELECT p.location, to_char(p.pay_date, 'YYYY-MM-DD') AS d, p.expected_cents, p.removed_cents,
+         p.counted_cents, p.receipted_cents, p.note, p.deposit_id,
+         d.created_at AS deposited_at, CASE WHEN d.id IS NULL THEN NULL
+           WHEN d.suffix IS NULL THEN d.title_base ELSE d.title_base || '-' || d.suffix END AS deposit_title
+    FROM cash_payments p LEFT JOIN cash_deposits d ON d.id = p.deposit_id`;
 
 // from/to clamped to Starting date … yesterday. → { from, to } or null (empty).
 function clampRange(from, to, start, yesterday) {
@@ -171,6 +181,7 @@ router.get('/settings', async (req, res) => {
       lastFetchedDay: last.rows[0] ? last.rows[0].d : null,
       fetching: CP.isSyncRunning(),
       groups: await readGroups(),
+      adminPinSet: !!(await readAdminPin()),
     });
   } catch (e) {
     console.error('GET /api/cash-payments/settings error:', e);
@@ -193,6 +204,55 @@ router.put('/starting-date', async (req, res) => {
     res.json({ startingDate: date, fetching: true });
   } catch (e) {
     console.error('PUT /api/cash-payments/starting-date error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Admin password (2026-11-20, Hera) ───────────────────────────────────────
+// Choosing "Admin" asks for it; custom groups don't. Not set yet → Admin opens
+// without one (so the first admin can set it in Settings). Changing it makes
+// every account that chose Admin choose again. Stored as a scrypt hash.
+async function readAdminPin() {
+  const r = await pool.query(`SELECT value FROM app_settings WHERE key = 'cash_admin_pin'`);
+  const v = r.rows[0] ? r.rows[0].value : null;
+  return v && v.hash && v.salt ? v : null;
+}
+function hashPin(pin, salt) {
+  return crypto.scryptSync(String(pin), salt, 32).toString('hex');
+}
+async function adminPinOk(pin) {
+  const v = await readAdminPin();
+  if (!v) return true;
+  const a = Buffer.from(hashPin(pin || '', v.salt), 'hex');
+  const b = Buffer.from(v.hash, 'hex');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+router.put('/admin-pin', async (req, res) => {
+  try {
+    const pin = String((req.body && req.body.pin) || '');
+    if (!/^\d{4,8}$/.test(pin)) return res.status(400).json({ error: 'The password must be 4 to 8 digits.' });
+    const salt = crypto.randomBytes(16).toString('hex');
+    await pool.query(
+      `INSERT INTO app_settings (key, value, updated_at) VALUES ('cash_admin_pin', $1::jsonb, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = $1::jsonb, updated_at = NOW()`,
+      [JSON.stringify({ salt, hash: hashPin(pin, salt) })]
+    );
+    // Everyone in Admin enters the new password next time.
+    await pool.query(`DELETE FROM cash_account_groups WHERE group_id = $1`, [ADMIN_ID]);
+    res.json({ adminPinSet: true });
+  } catch (e) {
+    console.error('PUT /api/cash-payments/admin-pin error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /admin-pin/check { pin } → { ok } (the page checks before saving Admin locally)
+router.post('/admin-pin/check', async (req, res) => {
+  try {
+    res.json({ ok: await adminPinOk(req.body && req.body.pin) });
+  } catch (e) {
+    console.error('POST /api/cash-payments/admin-pin/check error:', e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -260,6 +320,9 @@ router.put('/groups/my', async (req, res) => {
     const gid = parseInt(req.body && req.body.groupId, 10);
     const groups = await readGroups();
     if (!(gid === ADMIN_ID || groups.some(g => Number(g.id) === gid))) return res.status(400).json({ error: 'Unknown group.' });
+    if (gid === ADMIN_ID && !(await adminPinOk(req.body && req.body.pin))) {
+      return res.status(403).json({ error: 'Incorrect password.', wrongPin: true });
+    }
     const accountId = await getAccountId(req);
     if (!accountId) return res.json({ identified: false, success: false });
     await pool.query(
@@ -319,36 +382,33 @@ router.delete('/groups/:id', async (req, res) => {
 
 // ─── rows ───────────────────────────────────────────────────────────────────
 
-const FILTERS = ['all', 'collected', 'pending', 'mismatch', 'archived'];
+const FILTERS = ['all', 'collected', 'pending', 'mismatch', 'deposited', 'notdeposited'];
+const EMPTY_COUNTS = { all: 0, collected: 0, pending: 0, mismatch: 0, deposited: 0, notdeposited: 0 };
 
 router.get('/rows', async (req, res) => {
   try {
     const rangeCtx = await rangeContext();
     const { start, today, yesterday } = rangeCtx;
-    const empty = { counts: { all: 0, collected: 0, pending: 0, mismatch: 0, archived: 0 }, rows: [], total: 0, page: 1, pages: 1 };
+    const empty = { counts: { ...EMPTY_COUNTS }, rows: [], total: 0, page: 1, pages: 1 };
     if (!start) return res.json({ ...empty, noStartingDate: true, today, yesterday });
     const locations = String(req.query.locations || '').split(',').map(s => s.trim()).filter(Boolean);
     const range = clampRange(req.query.from, req.query.to, start, yesterday);
     if (!locations.length || !range) return res.json({ ...empty, startingDate: start, today, yesterday, range });
 
     const r = await pool.query(
-      `SELECT location, to_char(pay_date, 'YYYY-MM-DD') AS d, system_cents, unrounded_cents, declared_cents, counted_cents, note, archived_at
-         FROM cash_payments
-        WHERE location = ANY($1::text[]) AND pay_date BETWEEN $2::date AND $3::date`,
+      `${ROW_SELECT} WHERE p.location = ANY($1::text[]) AND p.pay_date BETWEEN $2::date AND $3::date`,
       [locations, range.from, range.to]
     );
     const all = r.rows.map(shapeRow);
-    const counts = {
-      all: all.length,
-      collected: all.filter(x => x.flags.collected).length,
-      pending: all.filter(x => x.flags.pending).length,
-      mismatch: all.filter(x => x.flags.mismatch).length,
-      archived: all.filter(x => x.flags.archived).length,
-    };
+    const counts = { ...EMPTY_COUNTS };
+    for (const x of all) {
+      counts.all += 1;
+      for (const k of Object.keys(x.flags)) if (x.flags[k]) counts[k] += 1;
+    }
     const filter = FILTERS.includes(req.query.filter) ? req.query.filter : 'all';
     let list = filter === 'all' ? all : all.filter(x => x.flags[filter]);
 
-    // Location (MTL, OTT, QC, EDM, CAL; number ascending), then date —
+    // Location (MTL, OTT, QC, EDM, CAL; numbers ascending), then date —
     // sort=asc oldest first (Collect), otherwise newest first (Audit).
     const asc = req.query.sort === 'asc';
     list.sort((a, b) => compareLocations(a.location, b.location)
@@ -360,6 +420,28 @@ router.get('/rows', async (req, res) => {
     const page = Math.min(pages, Math.max(1, parseInt(req.query.page, 10) || 1));
     if (pageSize) list = list.slice((page - 1) * pageSize, page * pageSize);
 
+    // Per-drawer lines (Audit detail list): drawer, Ending, Removed.
+    if (req.query.drawers === '1' && list.length) {
+      const d = await pool.query(
+        `SELECT location, to_char(pay_date, 'YYYY-MM-DD') AS d, drawer_id, drawer_name, opening_cents, ending_cents, removed_cents
+           FROM cash_drawer_days WHERE location = ANY($1::text[]) AND pay_date BETWEEN $2::date AND $3::date`,
+        [Array.from(new Set(list.map(x => x.location))), range.from, range.to]
+      );
+      const by = new Map();
+      for (const x of d.rows) {
+        const k = `${x.location}|${x.d}`;
+        if (!by.has(k)) by.set(k, []);
+        by.get(k).push({ id: x.drawer_id, name: x.drawer_name, opening: num(x.opening_cents), ending: num(x.ending_cents), removed: num(x.removed_cents) });
+      }
+      const drawerKey = (n) => { const m = /^(\d+)$/.exec(n); return m ? [0, Number(m[1]), n] : [1, 0, n]; };
+      for (const x of list) {
+        x.drawers = (by.get(`${x.location}|${x.date}`) || []).sort((a, b) => {
+          const ka = drawerKey(String(a.name)); const kb = drawerKey(String(b.name));
+          return ka[0] - kb[0] || ka[1] - kb[1] || String(ka[2]).localeCompare(String(kb[2]));
+        });
+      }
+    }
+
     res.json({ counts, rows: list, total, page, pages, startingDate: start, today, yesterday, range, fetching: CP.isSyncRunning(), testMode: rangeCtx.test.on });
   } catch (e) {
     console.error('GET /api/cash-payments/rows error:', e);
@@ -367,34 +449,29 @@ router.get('/rows', async (req, res) => {
   }
 });
 
-async function loadRow(location, date) {
-  const r = await pool.query(
-    `SELECT location, to_char(pay_date, 'YYYY-MM-DD') AS d, system_cents, unrounded_cents, declared_cents, counted_cents, note, archived_at
-       FROM cash_payments WHERE location = $1 AND pay_date = $2::date`,
-    [location, date]
-  );
+async function loadRow(location, date, db = pool) {
+  const r = await db.query(`${ROW_SELECT} WHERE p.location = $1 AND p.pay_date = $2::date`, [location, date]);
   return r.rows[0] || null;
 }
 
-// Declared / Counted. Only the fields sent are changed; '' / null clears one.
+// Counted / Receipted removed. Only the fields sent are changed; '' / null clears one.
 router.put('/row', async (req, res) => {
   try {
     const { location, date } = req.body || {};
     if (!location || !CP.isIsoDate(date)) return res.status(400).json({ error: 'Missing location or date.' });
     const row = await loadRow(location, date);
-    if (!row) return res.status(404).json({ error: 'This day has no System amount yet.' });
-    if (row.archived_at) return res.status(409).json({ error: 'This day is archived and can’t be changed.' });
-    if (Number(row.system_cents) === 0) return res.status(409).json({ error: 'No cash this day — nothing to enter.' });
+    if (!row) return res.status(404).json({ error: 'This day has no drawer data yet.' });
+    if (row.deposit_id !== null && row.deposit_id !== undefined) return res.status(409).json({ error: 'This day is deposited and can’t be changed.' });
     const sets = [];
     const params = [location, date];
     try {
-      if (Object.prototype.hasOwnProperty.call(req.body, 'declared')) {
-        params.push(parseAmount(req.body.declared));
-        sets.push(`declared_cents = $${params.length}`);
-      }
       if (Object.prototype.hasOwnProperty.call(req.body, 'counted')) {
         params.push(parseAmount(req.body.counted));
         sets.push(`counted_cents = $${params.length}`);
+      }
+      if (Object.prototype.hasOwnProperty.call(req.body, 'receipted')) {
+        params.push(parseAmount(req.body.receipted));
+        sets.push(`receipted_cents = $${params.length}`);
       }
     } catch (e) {
       return res.status(400).json({ error: e.message });
@@ -402,7 +479,7 @@ router.put('/row', async (req, res) => {
     if (sets.length) {
       await pool.query(
         `UPDATE cash_payments SET ${sets.join(', ')}, updated_at = NOW()
-          WHERE location = $1 AND pay_date = $2::date AND archived_at IS NULL`,
+          WHERE location = $1 AND pay_date = $2::date AND deposit_id IS NULL`,
         params
       );
     }
@@ -413,7 +490,7 @@ router.put('/row', async (req, res) => {
   }
 });
 
-// One note per row; can be added / edited / deleted any time (also archived rows).
+// One note per row; can be added / edited / deleted any time (also deposited rows).
 router.put('/note', async (req, res) => {
   try {
     const { location, date } = req.body || {};
@@ -432,33 +509,102 @@ router.put('/note', async (req, res) => {
   }
 });
 
-// Save & Archive: every not-yet-archived row of one location in the range.
-// Refused while any of them is still Pending.
-router.post('/archive', async (req, res) => {
+// ─── deposits (2026-11-20, Hera) ─────────────────────────────────────────────
+
+// createDeposit(): services/cashPayments.js (also used by Test Mode).
+const { createDeposit } = CP;
+
+// Make Deposit: the chosen days of one location → one deposit; they lock.
+// Refused when a day is Pending, already deposited, or not found.
+router.post('/deposits', async (req, res) => {
+  const { location } = req.body || {};
+  const dates = Array.from(new Set((Array.isArray(req.body && req.body.dates) ? req.body.dates : []).filter(CP.isIsoDate)));
+  const note = String((req.body && req.body.note) || '').trim();
+  if (!location) return res.status(400).json({ error: 'Choose a location.' });
+  if (!dates.length) return res.status(400).json({ error: 'Select at least one day.' });
+  if (note.length > NOTE_MAX) return res.status(400).json({ error: `Note is too long (max ${NOTE_MAX}).` });
+  const client = await pool.connect();
   try {
-    const { location } = req.body || {};
-    if (!location) return res.status(400).json({ error: 'Choose a location.' });
-    const { start, yesterday } = await rangeContext();
-    if (!start) return res.status(400).json({ error: 'Set a Starting date first.' });
-    const range = clampRange(req.body.from, req.body.to, start, yesterday);
-    if (!range) return res.status(400).json({ error: 'Nothing to archive in this date range.' });
-    const pend = await pool.query(
-      `SELECT COUNT(*)::int AS n FROM cash_payments
-        WHERE location = $1 AND pay_date BETWEEN $2::date AND $3::date AND archived_at IS NULL
-          AND system_cents <> 0 AND (declared_cents IS NULL OR counted_cents IS NULL)`,
-      [location, range.from, range.to]
+    await client.query('BEGIN');
+    const r = await client.query(
+      `SELECT pay_date, to_char(pay_date, 'YYYY-MM-DD') AS d, expected_cents, removed_cents, counted_cents, deposit_id, is_test
+         FROM cash_payments WHERE location = $1 AND to_char(pay_date, 'YYYY-MM-DD') = ANY($2::text[]) FOR UPDATE`,
+      [location, dates]
     );
-    if (pend.rows[0].n > 0) {
-      return res.status(400).json({ error: `${pend.rows[0].n} day(s) are still Pending. Enter Declared and Counted for every day first.`, pending: pend.rows[0].n });
-    }
-    const r = await pool.query(
-      `UPDATE cash_payments SET archived_at = NOW(), updated_at = NOW()
-        WHERE location = $1 AND pay_date BETWEEN $2::date AND $3::date AND archived_at IS NULL`,
-      [location, range.from, range.to]
+    if (r.rows.length !== dates.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Some days were not found.' }); }
+    const bad = r.rows.filter(x => x.deposit_id !== null);
+    if (bad.length) { await client.query('ROLLBACK'); return res.status(409).json({ error: `Already deposited: ${bad.map(x => x.d).join(', ')}.` }); }
+    const pending = r.rows.filter(x => x.counted_cents === null && !(Number(x.expected_cents) === 0 && Number(x.removed_cents) === 0));
+    if (pending.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: `Pending days can’t be deposited: ${pending.map(x => x.d).join(', ')}.` }); }
+    const dep = await createDeposit(client, location, note, { isTest: r.rows.every(x => x.is_test) });
+    await client.query(
+      `UPDATE cash_payments SET deposit_id = $3, updated_at = NOW() WHERE location = $1 AND to_char(pay_date, 'YYYY-MM-DD') = ANY($2::text[])`,
+      [location, dates, dep.id]
     );
-    res.json({ archived: r.rowCount });
+    await client.query('COMMIT');
+    res.json({ deposit: { id: dep.id, title: depositTitle(dep), days: dates.length } });
   } catch (e) {
-    console.error('POST /api/cash-payments/archive error:', e);
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('POST /api/cash-payments/deposits error:', e);
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
+});
+
+// Deposits of the given locations that hold at least one day in from..to,
+// newest first, with their totals.
+router.get('/deposits', async (req, res) => {
+  try {
+    const { start, yesterday } = await rangeContext();
+    const locations = String(req.query.locations || '').split(',').map(s => s.trim()).filter(Boolean);
+    const range = start ? clampRange(req.query.from, req.query.to, start, yesterday) : null;
+    if (!locations.length || !range) return res.json({ deposits: [] });
+    const r = await pool.query(
+      `SELECT d.id, d.location, d.title_base, d.suffix, d.note, d.created_at,
+              COUNT(p.pay_date)::int AS days,
+              COALESCE(SUM(p.expected_cents), 0)::bigint AS expected,
+              COALESCE(SUM(p.counted_cents), 0)::bigint AS counted,
+              COALESCE(SUM(p.removed_cents), 0)::bigint AS removed,
+              COALESCE(SUM(CASE WHEN p.receipted_cents IS NULL THEN 0 ELSE p.receipted_cents - p.removed_cents END), 0)::bigint AS removed_diff
+         FROM cash_deposits d JOIN cash_payments p ON p.deposit_id = d.id
+        WHERE d.location = ANY($1::text[])
+          AND d.id IN (SELECT deposit_id FROM cash_payments
+                        WHERE deposit_id IS NOT NULL AND location = ANY($1::text[]) AND pay_date BETWEEN $2::date AND $3::date)
+        GROUP BY d.id, d.location, d.title_base, d.suffix, d.note, d.created_at
+        ORDER BY d.created_at DESC, d.id DESC`,
+      [locations, range.from, range.to]
+    );
+    res.json({
+      deposits: r.rows.map(d => ({
+        id: d.id,
+        title: depositTitle(d),
+        location: d.location,
+        createdAt: d.created_at,
+        days: d.days,
+        expected: Number(d.expected),
+        counted: Number(d.counted),
+        removed: Number(d.removed),
+        removedDiff: Number(d.removed_diff),
+        note: d.note || '',
+      })),
+    });
+  } catch (e) {
+    console.error('GET /api/cash-payments/deposits error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.put('/deposits/:id/note', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const note = String((req.body && req.body.note) || '').trim();
+    if (note.length > NOTE_MAX) return res.status(400).json({ error: `Note is too long (max ${NOTE_MAX}).` });
+    const r = await pool.query(`UPDATE cash_deposits SET note = $2 WHERE id = $1`, [id, note || null]);
+    if (!r.rowCount) return res.status(404).json({ error: 'Deposit not found.' });
+    res.json({ id, note });
+  } catch (e) {
+    console.error('PUT /api/cash-payments/deposits/:id/note error:', e);
     res.status(500).json({ error: e.message });
   }
 });

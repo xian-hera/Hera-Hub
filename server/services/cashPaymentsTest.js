@@ -3,11 +3,12 @@
 //
 // Lets Hera try Collect / Audit before the real Starting date has come.
 //   - Offered only while the Starting date is empty or in the future.
-//   - On → "Populate Data": every active non-HQ location gets fake rows for
-//     the 30 days ending yesterday. The 23 older days are filled in (mostly
-//     Matched, some Mismatch with a note, some No cash, the oldest 16
-//     archived); the last 7 days are left Pending. Populating again replaces
-//     all fake rows.
+//   - On → "Populate Data": every active non-HQ location gets 2–3 fake
+//     drawers and fake days for the 30 days ending yesterday (2026-11-20:
+//     drawer-based — Ending, Removed per drawer). The 23 older days have
+//     Counted (mostly Matched, some Mismatch, some with Receipted removed or a
+//     note, some No cash); the oldest 16 are put into weekly fake deposits;
+//     the last 7 days are left Pending. Populating again replaces all fake data.
 //   - While it stays on, every new past day gets fake Pending rows (03:10 run,
 //     and whenever the page loads).
 //   - Off, or the Starting date reached (today or earlier) → every fake row is
@@ -28,7 +29,8 @@ const CP = require('./cashPayments');
 const KEY = 'cash_test_mode';
 const DAYS = 30;
 const PENDING_DAYS = 7;
-const ARCHIVED_DAYS = 16;
+const DEPOSITED_DAYS = 16;
+const FLOAT = 15000; // $150 at open, like the real drawers
 
 async function readState(db = pool) {
   const r = await db.query(`SELECT value FROM app_settings WHERE key = $1`, [KEY]);
@@ -44,6 +46,8 @@ async function writeState(state, db = pool) {
 }
 async function clearTestRows(db = pool) {
   const r = await db.query(`DELETE FROM cash_payments WHERE is_test = TRUE`);
+  await db.query(`DELETE FROM cash_drawer_days WHERE is_test = TRUE`);
+  await db.query(`DELETE FROM cash_deposits WHERE is_test = TRUE`);
   return r.rowCount;
 }
 
@@ -62,41 +66,81 @@ const NOTES = [
   'Test note: manager says a refund was given in cash.',
 ];
 
-// One fake row. kind: 'filled' | 'pending'
-function fakeRow(kind) {
-  const noCash = Math.random() < 0.06;
-  // System is rounded to 5 cents like the real one; unrounded = a few cents off.
-  const system = noCash ? 0 : rnd(3000, 50000) * 5;
-  const unrounded = noCash ? 0 : system + rnd(-2, 2);
-  if (kind === 'pending' || noCash) return { system, unrounded, declared: null, counted: null, note: null };
-  let declared = system;
-  let counted = system;
-  let note = null;
-  if (Math.random() < 0.3) {
-    const small = () => (Math.random() < 0.5 ? -1 : 1) * rnd(5, 900);
-    const which = rnd(1, 3); // 1 envelope off, 2 count off, 3 both
-    if (which !== 2) declared = Math.max(0, system + small());
-    if (which !== 1) counted = Math.max(0, declared + small());
-    if (declared === system && counted === system) counted = system + 100;
-    if (Math.random() < 0.4) note = pick(NOTES);
-  }
-  return { system, unrounded, declared, counted, note };
+const round5 = (c) => Math.round(c / 5) * 5;
+
+// Fake drawers of a location: 2–3 numbers, stable per location (e.g. 901, 902).
+function fakeDrawers(loc, index) {
+  const n = 2 + (index % 2);
+  return Array.from({ length: n }, (_, i) => ({ id: `test-${loc}-${i + 1}`, name: String(900 + index * 3 + i + 1) }));
 }
 
-async function insertRows(client, locations, days, kindOf, archivedUntil) {
-  for (const day of days) {
-    const kind = kindOf(day);
-    for (const loc of locations) {
-      const r = fakeRow(kind);
-      const archived = kind === 'filled' && archivedUntil && day <= archivedUntil;
-      // Never overwrite a real row.
-      await client.query(
-        `INSERT INTO cash_payments (location, pay_date, system_cents, unrounded_cents, declared_cents, counted_cents, note, archived_at, is_test)
-         VALUES ($1, $2::date, $3, $7, $4, $5, $6, ${archived ? 'NOW()' : 'NULL'}, TRUE)
-         ON CONFLICT (location, pay_date) DO NOTHING`,
-        [loc, day, r.system, r.declared, r.counted, r.note, r.unrounded]
-      );
+// One fake day of one location. kind: 'filled' | 'pending'
+function fakeDay(kind, drawers) {
+  const noCash = Math.random() < 0.05;
+  const lines = drawers.map((d) => {
+    const sales = noCash || Math.random() < 0.15 ? 0 : round5(rnd(2000, 90000));
+    const removed = !noCash && sales > 0 && Math.random() < 0.15 ? round5(rnd(200, 3000)) : 0;
+    return { ...d, opening: FLOAT, ending: FLOAT + sales - removed, removed };
+  });
+  const expected = lines.reduce((a, l) => a + l.ending - l.opening, 0);
+  const removed = lines.reduce((a, l) => a + l.removed, 0);
+  let counted = null;
+  let receipted = null;
+  let note = null;
+  if (kind === 'filled' && !(expected === 0 && removed === 0)) {
+    counted = expected;
+    if (Math.random() < 0.25) {
+      counted = Math.max(0, expected + (Math.random() < 0.5 ? -1 : 1) * round5(rnd(5, 900)));
+      if (Math.random() < 0.5) note = pick(NOTES);
     }
+    if (removed > 0) {
+      const r = Math.random();
+      if (r < 0.6) receipted = removed;
+      else if (r < 0.8) receipted = Math.max(0, removed - round5(rnd(100, 1000)));
+    }
+  }
+  return { lines, expected, removed, counted, receipted, note };
+}
+
+// Never overwrites a real row.
+async function insertDay(client, loc, day, f, depositId) {
+  for (const l of f.lines) {
+    await client.query(
+      `INSERT INTO cash_drawer_days (location, pay_date, drawer_id, drawer_name, opening_cents, ending_cents, removed_cents, sessions, is_test)
+       VALUES ($1, $2::date, $3, $4, $5, $6, $7, 1, TRUE) ON CONFLICT (location, pay_date, drawer_id) DO NOTHING`,
+      [loc, day, l.id, l.name, l.opening, l.ending, l.removed]
+    );
+  }
+  await client.query(
+    `INSERT INTO cash_payments (location, pay_date, expected_cents, removed_cents, counted_cents, receipted_cents, note, deposit_id, is_test)
+     VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, TRUE) ON CONFLICT (location, pay_date) DO NOTHING`,
+    [loc, day, f.expected, f.removed, f.counted, f.receipted, f.note, depositId]
+  );
+}
+
+async function insertRows(client, locations, days, kindOf, depositedUntil) {
+  const sorted = [...locations].sort();
+  for (const [index, loc] of sorted.entries()) {
+    const drawers = fakeDrawers(loc, index);
+    let week = [];
+    const flush = async () => {
+      if (!week.length) return;
+      // Fake deposit made the morning after the week's last day.
+      const createdAt = `${CP.addDays(week[week.length - 1].day, 1)}T16:${String(rnd(10, 59))}:00Z`;
+      const dep = await CP.createDeposit(client, loc, Math.random() < 0.3 ? 'Test deposit note.' : '', { isTest: true, createdAt });
+      for (const w of week) await insertDay(client, loc, w.day, w.f, dep.id);
+      week = [];
+    };
+    for (const day of days) {
+      const f = fakeDay(kindOf(day), drawers);
+      if (kindOf(day) === 'filled' && depositedUntil && day <= depositedUntil) {
+        week.push({ day, f });
+        if (week.length === 7 || day === depositedUntil) await flush();
+      } else {
+        await insertDay(client, loc, day, f, null);
+      }
+    }
+    await flush();
   }
 }
 
@@ -109,13 +153,13 @@ async function populate() {
   const days = [];
   for (let d = from; d <= yesterday; d = CP.addDays(d, 1)) days.push(d);
   const pendingFrom = CP.addDays(yesterday, -(PENDING_DAYS - 1));
-  const archivedUntil = CP.addDays(from, ARCHIVED_DAYS - 1);
+  const depositedUntil = CP.addDays(from, DEPOSITED_DAYS - 1);
   const locations = await CP.activeLocations();
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     await clearTestRows(client);
-    await insertRows(client, locations, days, (d) => (d >= pendingFrom ? 'pending' : 'filled'), archivedUntil);
+    await insertRows(client, locations, days, (d) => (d >= pendingFrom ? 'pending' : 'filled'), depositedUntil);
     await writeState({ on: true, from }, client);
     await client.query('COMMIT');
   } catch (e) {

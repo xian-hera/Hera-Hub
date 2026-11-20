@@ -36,6 +36,47 @@ async function ensureCashPaymentsTables(client) {
   await client.query(`ALTER TABLE cash_payments ADD COLUMN IF NOT EXISTS unrounded_cents BIGINT`);
   // Preview & Test Mode fake rows (2026-11-19, temporary — services/cashPaymentsTest.js).
   await client.query(`ALTER TABLE cash_payments ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE`);
+  // ── Drawer-based structure (2026-11-20, Hera) ─────────────────────────────
+  // System / Declared / Archive are no longer used (columns kept, unused).
+  //   expected_cents = Σ over the location's drawers of (Ending cash − cash at open)
+  //   removed_cents  = Σ cash removed from the drawers that day (positive)
+  //   counted_cents  = entered by finance (existing column)
+  //   receipted_cents = removed cash backed by receipts (optional)
+  //   deposit_id     = the deposit this day belongs to (Make Deposit) → locked
+  await client.query(`ALTER TABLE cash_payments ADD COLUMN IF NOT EXISTS expected_cents BIGINT NOT NULL DEFAULT 0`);
+  await client.query(`ALTER TABLE cash_payments ADD COLUMN IF NOT EXISTS removed_cents BIGINT NOT NULL DEFAULT 0`);
+  await client.query(`ALTER TABLE cash_payments ADD COLUMN IF NOT EXISTS receipted_cents BIGINT`);
+  await client.query(`ALTER TABLE cash_payments ADD COLUMN IF NOT EXISTS deposit_id INTEGER`);
+  // One row per location / day / drawer (POS cash drawer, e.g. "71").
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS cash_drawer_days (
+      location      TEXT NOT NULL,
+      pay_date      DATE NOT NULL,
+      drawer_id     TEXT NOT NULL,
+      drawer_name   TEXT NOT NULL,
+      opening_cents BIGINT NOT NULL DEFAULT 0,
+      ending_cents  BIGINT,
+      removed_cents BIGINT NOT NULL DEFAULT 0,
+      sessions      INTEGER NOT NULL DEFAULT 1,
+      is_test       BOOLEAN NOT NULL DEFAULT FALSE,
+      PRIMARY KEY (location, pay_date, drawer_id)
+    )
+  `);
+  // Deposits: days of one location put together by Make Deposit. Title shown =
+  // title_base ("MTL01-JAN-05", day of Make Deposit, Toronto) + "-" + suffix
+  // when the same base exists more than once in title_year (A, B, C…).
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS cash_deposits (
+      id         SERIAL PRIMARY KEY,
+      location   TEXT NOT NULL,
+      title_base TEXT NOT NULL,
+      title_year INTEGER NOT NULL,
+      suffix     TEXT,
+      note       TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      is_test    BOOLEAN NOT NULL DEFAULT FALSE
+    )
+  `);
   await client.query(`
     CREATE TABLE IF NOT EXISTS cash_payment_days (
       pay_date   DATE PRIMARY KEY,

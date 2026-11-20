@@ -1,18 +1,22 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Page, Card, BlockStack, InlineStack, Button, Banner, Text, Modal } from '@shopify/polaris';
-import CashTable from './CashTable';
-import { api, SingleSelect, CollectDateRange, FilterPills, lastDays, currentVisit, isRangeReady, notReadyText } from './cashShared';
+import { Page, Card, BlockStack, InlineStack, Button, Banner, Text, Modal, TextField } from '@shopify/polaris';
+import { CollectTable, canDeposit } from './CashTable';
+import { api, SingleSelect, CollectDateRange, FilterPills, lastDays, currentVisit, isRangeReady, notReadyText, dateParts } from './cashShared';
 
-// Cash Payments › Collect (2026-11-19, Hera — claude/CASH_PAYMENTS_SPEC.md).
-// The finance person picks one location and a date range (default Last 7
-// days) and types Declared / Counted for each day (one row = one envelope).
-// Every box is saved as soon as she leaves it. Save & Archive locks every
-// not-archived day of the range; refused while any day is Pending.
-// Count pills = status filter (one at a time, default Pending); the numbers
-// only depend on location + date range. Rows oldest → newest.
+// Cash Payments › Collect (2026-11-19, Hera — claude/CASH_PAYMENTS_SPEC.md;
+// drawer-based since 2026-11-20).
+// Finance picks one location and a date range (default Last 7 days). Per day:
+// Expected / Removed come from the POS drawers; she types Counted and,
+// optionally, Receipted removed (saved as soon as she leaves the box).
+// Make Deposit: the ticked days become one deposit and lock (Pending days
+// can't be ticked). Count pills = status filter (one at a time, default
+// Pending); the numbers only depend on location + date range. Oldest → newest.
+// (Before 2026-11-20: Declared / Counted vs System, and Save & Archive.)
 
 // Kept for the visit so going to Audit and back doesn't reset the filters.
 let memo = null; // { location, range, filter }
+
+const EMPTY_COUNTS = { all: 0, collected: 0, pending: 0, mismatch: 0, deposited: 0, notdeposited: 0 };
 
 export default function CashCollect({ settings, locations }) {
   if (memo && memo.visit !== currentVisit()) memo = null; // new visit → default filters
@@ -28,11 +32,14 @@ export default function CashCollect({ settings, locations }) {
   // Rows edited while a filter is on stay visible until the filters change
   // (a row doesn't vanish from under the cursor when it stops being Pending).
   const [sticky, setSticky] = useState(() => new Set());
-  const [confirmArchive, setConfirmArchive] = useState(false);
-  const [archiving, setArchiving] = useState(false);
+  const [selected, setSelected] = useState(() => new Set());
+  const [confirmDeposit, setConfirmDeposit] = useState(false);
+  const [depositNote, setDepositNote] = useState('');
+  const [depositing, setDepositing] = useState(false);
 
   useEffect(() => { memo = { visit: currentVisit(), location, range, filter }; }, [location, range, filter]);
   useEffect(() => { setSticky(new Set()); }, [location, range, filter]);
+  useEffect(() => { setSelected(new Set()); }, [location, range]);
 
   const load = useCallback(async () => {
     if (!location || !range) { setRows([]); return; }
@@ -46,16 +53,18 @@ export default function CashCollect({ settings, locations }) {
   }, [location, range]);
   useEffect(() => { load(); }, [load]);
 
-  const counts = useMemo(() => ({
-    all: rows.length,
-    collected: rows.filter(r => r.flags.collected).length,
-    pending: rows.filter(r => r.flags.pending).length,
-    mismatch: rows.filter(r => r.flags.mismatch).length,
-    archived: rows.filter(r => r.flags.archived).length,
-  }), [rows]);
+  const counts = useMemo(() => {
+    const c = { ...EMPTY_COUNTS };
+    for (const r of rows) {
+      c.all += 1;
+      for (const k of Object.keys(r.flags)) if (r.flags[k]) c[k] = (c[k] || 0) + 1;
+    }
+    return c;
+  }, [rows]);
   const keyOf = (r) => `${r.location}|${r.date}`;
   const shown = filter === 'all' ? rows : rows.filter(r => r.flags[filter] || sticky.has(keyOf(r)));
-  const toArchive = rows.filter(r => !r.archived).length;
+  // Ticked days that can still be deposited (a day that became Pending again drops out).
+  const toDeposit = rows.filter(r => selected.has(keyOf(r)) && canDeposit(r));
 
   const replaceRow = (row) => {
     setRows(list => list.map(r => (keyOf(r) === keyOf(row) ? row : r)));
@@ -78,25 +87,19 @@ export default function CashCollect({ settings, locations }) {
     replaceRow(d.row);
   };
 
-  const archive = async () => {
-    setArchiving(true); setError('');
+  const makeDeposit = async () => {
+    setDepositing(true); setError('');
     try {
-      const d = await api('POST', '/archive', { location, from: range.from, to: range.to });
-      setInfo(`${d.archived} day(s) archived.`);
-      setConfirmArchive(false);
+      const d = await api('POST', '/deposits', { location, dates: toDeposit.map(r => r.date), note: depositNote });
+      setInfo(`${d.deposit.title}: ${d.deposit.days} day(s) deposited.`);
+      setConfirmDeposit(false);
+      setDepositNote('');
+      setSelected(new Set());
       await load();
     } catch (e) {
       setError(e.message);
-      setConfirmArchive(false);
-    } finally { setArchiving(false); }
-  };
-  const tryArchive = () => {
-    setInfo('');
-    if (counts.pending > 0) {
-      setError(`${counts.pending} day(s) are still Pending. Enter Declared and Counted for every day before Save & Archive.`);
-      return;
-    }
-    setConfirmArchive(true);
+      setConfirmDeposit(false);
+    } finally { setDepositing(false); }
   };
 
   if (!ready) {
@@ -107,12 +110,15 @@ export default function CashCollect({ settings, locations }) {
     );
   }
 
+  const total = (k) => toDeposit.reduce((a, r) => a + (r[k] || 0), 0);
+  const money = (c) => `${c < 0 ? '-' : ''}${(Math.abs(c) / 100).toFixed(2)}`;
+
   return (
     <Page>
       <BlockStack gap="400">
         {error && <Banner tone="critical" onDismiss={() => setError('')}>{error}</Banner>}
         {info && <Banner tone="success" onDismiss={() => setInfo('')}>{info}</Banner>}
-        {fetching && <Banner tone="info">System amounts are being fetched from Shopify. Reload in a minute to see every day.</Banner>}
+        {fetching && <Banner tone="info">Drawer cash is being fetched from Shopify. Reload in a minute to see every day.</Banner>}
 
         <Card>
           <InlineStack gap="400" wrap blockAlign="end">
@@ -135,17 +141,19 @@ export default function CashCollect({ settings, locations }) {
               <div style={{ padding: '16px 16px 4px' }}>
                 <InlineStack align="space-between" blockAlign="center" gap="300" wrap>
                   <FilterPills counts={counts} value={filter} onChange={setFilter} />
-                  <Button variant="primary" onClick={tryArchive} disabled={loading || toArchive === 0}>Save &amp; Archive</Button>
+                  <Button variant="primary" onClick={() => setConfirmDeposit(true)} disabled={loading || toDeposit.length === 0}>
+                    {toDeposit.length ? `Make Deposit (${toDeposit.length})` : 'Make Deposit'}
+                  </Button>
                 </InlineStack>
               </div>
               {loading && rows.length === 0
                 ? <div style={{ padding: 16 }}><Text tone="subdued">Loading...</Text></div>
                 : (
-                  <CashTable
+                  <CollectTable
                     rows={shown}
                     currentYear={Number(settings.today.slice(0, 4))}
-                    editable
-                    center
+                    selected={selected}
+                    onSelect={setSelected}
                     onSaveAmount={saveAmount}
                     onSaveNote={saveNote}
                     emptyText={rows.length === 0 ? 'No days in this range yet.' : 'No days with this status.'}
@@ -158,16 +166,20 @@ export default function CashCollect({ settings, locations }) {
       </BlockStack>
 
       <Modal
-        open={confirmArchive}
-        onClose={() => setConfirmArchive(false)}
-        title="Save & Archive?"
-        primaryAction={{ content: 'Save & Archive', onAction: archive, loading: archiving }}
-        secondaryActions={[{ content: 'Cancel', onAction: () => setConfirmArchive(false) }]}
+        open={confirmDeposit}
+        onClose={() => setConfirmDeposit(false)}
+        title={`Make Deposit — ${location || ''}`}
+        primaryAction={{ content: 'Make Deposit', onAction: makeDeposit, loading: depositing }}
+        secondaryActions={[{ content: 'Cancel', onAction: () => setConfirmDeposit(false) }]}
       >
         <Modal.Section>
-          <BlockStack gap="200">
-            <Text>{`${toArchive} day(s) of ${location || ''} will be archived.`}</Text>
-            <Text tone="critical">After archiving, Declared and Counted can no longer be changed. Notes can still be edited.</Text>
+          <BlockStack gap="300">
+            <Text>
+              {`${toDeposit.length} day(s): ${toDeposit.map(r => dateParts(r.date).main).join(', ')}`}
+            </Text>
+            <Text>{`Counted ${money(total('counted'))} · Expected ${money(total('expected'))} · Removed ${money(total('removed'))}`}</Text>
+            <TextField label="Deposit note (optional)" value={depositNote} onChange={setDepositNote} multiline={2} maxLength={1000} autoComplete="off" />
+            <Text tone="critical">After the deposit, these days can no longer be changed. Notes can still be edited.</Text>
           </BlockStack>
         </Modal.Section>
       </Modal>

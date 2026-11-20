@@ -82,7 +82,7 @@ function StartingDateCard({ settings, onSaved }) {
       await api('PUT', '/starting-date', { date: value });
       await onSaved();
       setInfo(value <= settings.yesterday
-        ? 'Saved. System amounts for the missing days are being fetched from Shopify — this can take a minute.'
+        ? 'Saved. Drawer cash for the missing days is being fetched from Shopify — this can take a minute.'
         : 'Saved. Days will appear from this date on, each one the morning after (3:10 AM).');
     } catch (e) { setError(e.message); } finally { setBusy(false); }
   };
@@ -118,8 +118,8 @@ function StartingDateCard({ settings, onSaved }) {
         {settings.startingDate && settings.startingDate <= settings.yesterday && (
           <Text variant="bodySm" tone="subdued">
             {settings.lastFetchedDay
-              ? `System amounts fetched up to ${shortDate(settings.lastFetchedDay, year)}. Every day at 3:10 AM the previous day is added.`
-              : 'No System amounts fetched yet.'}
+              ? `Drawer cash fetched up to ${shortDate(settings.lastFetchedDay, year)}. Every day at 3:10 AM the previous day is added.`
+              : 'No drawer cash fetched yet.'}
           </Text>
         )}
         {settings.test && settings.test.allowed && <TestModeSection settings={settings} onSaved={onSaved} />}
@@ -175,11 +175,72 @@ function TestModeSection({ settings, onSaved }) {
   );
 }
 
-export default function CashSettings({ settings, allLocations, reloadSettings, logout }) {
+// Admin password (2026-11-20, Hera): asked when someone chooses Admin.
+// Changing it makes everyone in Admin enter the new one.
+function AdminPinCard({ settings, onSaved }) {
+  const [pin, setPin] = useState('');
+  const [pin2, setPin2] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [info, setInfo] = useState('');
+  const save = async () => {
+    if (!/^\d{4,8}$/.test(pin)) { setError('The password must be 4 to 8 digits.'); return; }
+    if (pin !== pin2) { setError('The two passwords don’t match.'); return; }
+    setBusy(true); setError(''); setInfo('');
+    try {
+      await api('PUT', '/admin-pin', { pin });
+      setPin(''); setPin2('');
+      await onSaved();
+      setInfo('Saved. Everyone in Admin (you too) will enter the new password next time they choose Admin.');
+    } catch (e) { setError(e.message); } finally { setBusy(false); }
+  };
+  const digits = (set) => (v) => { if (/^\d{0,8}$/.test(v)) set(v); setError(''); };
+  return (
+    <Card>
+      <BlockStack gap="300">
+        <Text variant="headingMd" as="h2">Admin password</Text>
+        <Text variant="bodySm" tone="subdued">
+          {settings.adminPinSet
+            ? 'Asked when someone chooses Admin. Other groups don’t need a password.'
+            : 'Not set yet — anyone can choose Admin without a password. Set one now.'}
+        </Text>
+        {error && <Banner tone="critical" onDismiss={() => setError('')}>{error}</Banner>}
+        {info && <Banner tone="success" onDismiss={() => setInfo('')}>{info}</Banner>}
+        <InlineStack gap="300" blockAlign="end" wrap>
+          <div style={{ width: 180 }}>
+            <TextField label={settings.adminPinSet ? 'New password' : 'Password'} type="password" value={pin} onChange={digits(setPin)} autoComplete="new-password" placeholder="4–8 digits" />
+          </div>
+          <div style={{ width: 180 }}>
+            <TextField label="Repeat" type="password" value={pin2} onChange={digits(setPin2)} autoComplete="new-password" />
+          </div>
+          <Button onClick={save} loading={busy} disabled={!pin || !pin2 || busy}>Save</Button>
+        </InlineStack>
+      </BlockStack>
+    </Card>
+  );
+}
+
+export default function CashSettings({ settings, isAdmin, allLocations, reloadSettings, logout }) {
   const [editing, setEditing] = useState(null); // null | 'new' | group
   const [error, setError] = useState('');
   const [loggingOut, setLoggingOut] = useState(false);
   const groups = settings.groups || [];
+
+  // Other groups (2026-11-20): only Log out here.
+  if (!isAdmin) {
+    return (
+      <Page>
+        <Card>
+          <BlockStack gap="300">
+            <Text>Log out to re-select your group.</Text>
+            <InlineStack>
+              <Button loading={loggingOut} onClick={async () => { setLoggingOut(true); await logout(); }}>Log out</Button>
+            </InlineStack>
+          </BlockStack>
+        </Card>
+      </Page>
+    );
+  }
 
   const del = async (g) => {
     if (!window.confirm(`Delete the group “${g.name}”? Accounts using it will choose a group again.`)) return;
@@ -201,7 +262,7 @@ export default function CashSettings({ settings, allLocations, reloadSettings, l
               <Button onClick={() => setEditing('new')}>Add group</Button>
             </InlineStack>
             <Text variant="bodySm" tone="subdued">
-              A group only sees its own locations in Collect and Audit. Admin always sees every location.
+              A group only sees its own locations in Collect. Admin sees every location, Audit and Settings.
             </Text>
             {groups.length === 0 && <Text tone="subdued">No groups yet.</Text>}
             {groups.map(g => (
@@ -224,6 +285,8 @@ export default function CashSettings({ settings, allLocations, reloadSettings, l
             ))}
           </BlockStack>
         </Card>
+
+        <AdminPinCard settings={settings} onSaved={reloadSettings} />
 
         <StartingDateCard settings={settings} onSaved={reloadSettings} />
       </BlockStack>

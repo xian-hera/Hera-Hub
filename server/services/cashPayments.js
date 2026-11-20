@@ -1,39 +1,49 @@
-// Cash Payments — System amounts from Shopify (2026-11-19, Hera —
-// claude/CASH_PAYMENTS_SPEC.md).
+// Cash Payments — drawer cash from Shopify POS (2026-11-19, Hera —
+// claude/CASH_PAYMENTS_SPEC.md; drawer-based since 2026-11-20).
 //
-// System = Shopify's cash net payments of one POS location on one day,
-// ROUNDED the way the cash was (rounded_net_payments — Canadian cash is
-// rounded to 5 cents; changed 2026-11-20, Hera: plain net_payments made almost
-// every day a few-cents Mismatch). The unrounded net_payments is kept too
-// (unrounded_cents) for the "Rounded from …" tooltip. Diffs use the rounded
-// System. POS "Remove cash" is a drawer adjustment, not a payment, so it is
-// NOT in these numbers (confirmed by Shopify support 2026-11-20). Same
-// numbers as Hera's report "All Stores Payments by gateway summary" (FROM
-// payments … transaction_kind IN sale/change/capture/refund), Payment gateway
-// "Cash", but grouped by day so many days come back in one query.
+// Every store closes each POS cash drawer (R1, R2… — Shopify calls them by a
+// number such as "71") at night. Per location per day Hub keeps:
+//   Expected = Σ over the location's drawers of (Ending cash − cash at open)
+//              (the $150 float stays in the drawer, so it is taken out —
+//              Hera 2026-11-20)
+//   Removed  = Σ cash removed from the drawers during the day ("Remove cash")
+// and per drawer: cash at open, Ending cash, Removed (cash_drawer_days).
+//
+// Source: Admin GraphQL pointOfSaleDevicePaymentSessions (one session = one
+// drawer from open to close). Needs scope read_cash_tracking; cash data only
+// for POS Pro locations. A session belongs to the Toronto day it was OPENED.
+//   Ending cash = cashCountedAtClose (falls back to closingBalance).
+//   Removed     = CashAdjustmentActivity of type ADJUSTMENT with a negative
+//                 amount (sign NOT documented by Shopify — check against one
+//                 real Remove cash before trusting it).
+//   A drawer whose session has no Ending cash (no cash counting, e.g. OTT03's
+//   drawer 133) is skipped.
+//
+// (Before 2026-11-20 this file fetched System = ShopifyQL cash net payments per
+// location; Hera chose to drop System completely. The columns stay, unused.)
 //
 // When: every day at 03:10 Toronto (jobs/cashPaymentsScheduler.js), shortly
 // after boot, and right after a Starting date is saved. Each run fetches every
-// day from the Starting date to yesterday that hasn't been fetched yet
-// (cash_payment_days), so a missed night catches up by itself. A fetched day
-// is never fetched again (Hera: once a day has passed its data is final).
-// No Starting date → nothing is fetched or stored.
-//
-// A location with no cash that day gets System 0 (its row shows grey and
-// needs no entry). Only active, non-HQ locations of the shared location map
-// get rows; names Shopify returns that aren't in the map are ignored.
-//
-// Needs the read_reports scope (shopifyqlQuery).
+// day from the Starting date to yesterday not fetched yet (cash_payment_days).
+// A day with a drawer still open is retried on the next run (for up to 3 days,
+// then stored without it). A fetched day is never fetched again.
+// No Starting date → nothing is fetched or stored. Deposited days never change.
 
 const { pool } = require('../database/init');
 const { gql } = require('./shopifyGql');
 
 const TZ = 'America/Toronto';
 const HQ = 'HQ';
-const CHUNK_DAYS = 40; // 40 days × ~20 locations stays under the 1000-row LIMIT
+const CHUNK_DAYS = 7;          // days per sessions query
+const WAIT_OPEN_DAYS = 3;      // retry a day with an open drawer this many days
 
 function torontoToday() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+}
+
+// Toronto calendar day of a timestamp.
+function torontoDay(ts) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ts));
 }
 
 // 'YYYY-MM-DD' ± n days (UTC noon, so DST can't shift the day).
@@ -46,6 +56,16 @@ function addDays(iso, n) {
 
 function isIsoDate(s) {
   return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(`${s}T12:00:00Z`));
+}
+
+// Midnight of a Toronto day as an ISO timestamp with its offset (DST-safe).
+function torontoMidnight(iso) {
+  const noon = new Date(`${iso}T12:00:00Z`);
+  const part = new Intl.DateTimeFormat('en-US', { timeZone: TZ, timeZoneName: 'shortOffset' })
+    .formatToParts(noon).find(p => p.type === 'timeZoneName');
+  const m = /GMT([+-])(\d{1,2})(?::(\d{2}))?/.exec(part ? part.value : '');
+  const off = m ? `${m[1]}${m[2].padStart(2, '0')}:${m[3] || '00'}` : '-05:00';
+  return `${iso}T00:00:00${off}`;
 }
 
 async function getStartingDate(db = pool) {
@@ -67,55 +87,69 @@ function toCents(v) {
   const n = Number(v);
   return Number.isFinite(n) ? Math.round(n * 100) : 0;
 }
+const money = (m) => (m && m.amount !== undefined && m.amount !== null ? toCents(m.amount) : null);
 
-const SHOPIFYQL = `query CashPayments($q: String!) {
-  shopifyqlQuery(query: $q) {
-    tableData { columns { name dataType } rows }
-    parseErrors
+const SESSIONS = `query CashSessions($q: String!, $after: String) {
+  pointOfSaleDevicePaymentSessions(first: 25, after: $after, query: $q) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id status openingTime closingTime
+      location { name }
+      cashDrawer { id name }
+      cashCountedAtOpen { amount }
+      cashCountedAtClose { amount }
+      closingBalance { amount }
+      cashActivities(first: 30) {
+        pageInfo { hasNextPage endCursor }
+        nodes { __typename time cash { amount } ... on CashAdjustmentActivity { type } }
+      }
+    }
+  }
+}`;
+const MORE_ACTIVITIES = `query MoreCashActivities($id: ID!, $after: String) {
+  pointOfSaleDevicePaymentSession(id: $id) {
+    cashActivities(first: 100, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes { __typename time cash { amount } ... on CashAdjustmentActivity { type } }
+    }
   }
 }`;
 
-// → Map 'LOC|YYYY-MM-DD' → { rounded, net } cents, for days from..to (inclusive).
-async function fetchCashByDay(from, to) {
-  const q = `FROM payments
-  SHOW net_payments, rounded_net_payments
-  WHERE transaction_kind IN ('sale', 'change', 'capture', 'refund')
-    AND payment_gateway = 'Cash'
-  GROUP BY pos_location_name, day
-  SINCE ${from} UNTIL ${to}
-  ORDER BY day ASC, pos_location_name ASC
-  LIMIT 1000`;
-  const data = await gql(SHOPIFYQL, { q });
-  const res = data && data.shopifyqlQuery;
-  const errs = res && res.parseErrors;
-  if (Array.isArray(errs) && errs.length) {
-    throw new Error(`ShopifyQL: ${errs.map(e => (typeof e === 'string' ? e : (e && (e.message || JSON.stringify(e))))).join('; ')}`);
+// Cash removed during a session (positive cents).
+function removedOf(activities) {
+  let removed = 0;
+  for (const a of activities) {
+    if (a && a.__typename === 'CashAdjustmentActivity' && a.type === 'ADJUSTMENT') {
+      const c = money(a.cash);
+      if (c !== null && c < 0) removed += -c;
+    }
   }
-  const table = res && res.tableData;
-  if (!table) throw new Error('ShopifyQL returned no table');
-  const cols = (table.columns || []).map(c => c.name);
-  const iLoc = cols.indexOf('pos_location_name');
-  const iDay = cols.indexOf('day');
-  const iAmt = cols.indexOf('net_payments');
-  const iRnd = cols.indexOf('rounded_net_payments');
-  let rows = table.rows;
-  if (typeof rows === 'string') { try { rows = JSON.parse(rows); } catch (e) { rows = []; } }
-  const out = new Map();
-  for (const row of Array.isArray(rows) ? rows : []) {
-    // rows can be objects keyed by column name or plain arrays.
-    const loc = Array.isArray(row) ? row[iLoc] : row.pos_location_name;
-    const day = String((Array.isArray(row) ? row[iDay] : row.day) || '').slice(0, 10);
-    const amt = Array.isArray(row) ? row[iAmt] : row.net_payments;
-    const rnd = Array.isArray(row) ? (iRnd >= 0 ? row[iRnd] : null) : row.rounded_net_payments;
-    if (!loc || !isIsoDate(day)) continue;
-    const key = `${loc}|${day}`;
-    const net = toCents(amt);
-    const rounded = rnd === null || rnd === undefined || rnd === '' ? net : toCents(rnd);
-    const cur = out.get(key) || { rounded: 0, net: 0 };
-    out.set(key, { rounded: cur.rounded + rounded, net: cur.net + net });
-  }
-  if (Array.isArray(rows) && rows.length >= 1000) {
-    console.warn(`[cash-payments] ${from}..${to}: 1000 rows returned — some may be missing; lower CHUNK_DAYS`);
+  return removed;
+}
+
+// All sessions opened from..to (Toronto days, inclusive).
+async function fetchSessions(from, to) {
+  const q = `opening_time:>='${torontoMidnight(from)}' opening_time:<'${torontoMidnight(addDays(to, 1))}'`;
+  const out = [];
+  let after = null;
+  for (;;) {
+    const data = await gql(SESSIONS, { q, after });
+    const conn = data && data.pointOfSaleDevicePaymentSessions;
+    if (!conn) break;
+    for (const s of conn.nodes || []) {
+      let acts = (s.cashActivities && s.cashActivities.nodes) || [];
+      let page = s.cashActivities && s.cashActivities.pageInfo;
+      while (page && page.hasNextPage) {
+        const more = await gql(MORE_ACTIVITIES, { id: s.id, after: page.endCursor });
+        const c = more && more.pointOfSaleDevicePaymentSession && more.pointOfSaleDevicePaymentSession.cashActivities;
+        if (!c) break;
+        acts = acts.concat(c.nodes || []);
+        page = c.pageInfo;
+      }
+      out.push({ ...s, activities: acts });
+    }
+    if (!conn.pageInfo || !conn.pageInfo.hasNextPage) break;
+    after = conn.pageInfo.endCursor;
   }
   return out;
 }
@@ -135,10 +169,36 @@ function toChunks(days) {
   return chunks;
 }
 
+// sessions → Map day → Map location → Map drawerId → drawer totals; plus days with an open drawer.
+function groupSessions(sessions) {
+  const byDay = new Map();
+  const openDays = new Set();
+  for (const s of sessions) {
+    const day = torontoDay(s.openingTime);
+    if (String(s.status || '').toUpperCase() === 'OPEN') { openDays.add(day); continue; }
+    const loc = s.location && s.location.name;
+    const drawer = s.cashDrawer || {};
+    const ending = money(s.cashCountedAtClose) ?? money(s.closingBalance);
+    if (!loc || !drawer.id || ending === null) continue; // no cash counting on this drawer
+    if (!byDay.has(day)) byDay.set(day, new Map());
+    const locs = byDay.get(day);
+    if (!locs.has(loc)) locs.set(loc, new Map());
+    const drawers = locs.get(loc);
+    const cur = drawers.get(drawer.id) || { name: drawer.name || drawer.id, opening: 0, ending: 0, removed: 0, sessions: 0 };
+    cur.opening += money(s.cashCountedAtOpen) || 0;
+    cur.ending += ending;
+    cur.removed += removedOf(s.activities);
+    cur.sessions += 1;
+    drawers.set(drawer.id, cur);
+  }
+  return { byDay, openDays };
+}
+
 async function syncOnce() {
   const start = await getStartingDate();
   if (!start) return { skipped: 'no starting date' };
-  const yesterday = addDays(torontoToday(), -1);
+  const today = torontoToday();
+  const yesterday = addDays(today, -1);
   if (start > yesterday) return { skipped: 'starting date not passed yet' };
 
   const done = await pool.query(
@@ -153,20 +213,38 @@ async function syncOnce() {
   const locations = await activeLocations();
   let fetchedDays = 0;
   for (const chunk of toChunks(missing)) {
-    const amounts = await fetchCashByDay(chunk[0], chunk[chunk.length - 1]);
+    const sessions = await fetchSessions(chunk[0], chunk[chunk.length - 1]);
+    const { byDay, openDays } = groupSessions(sessions);
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
       for (const day of chunk) {
+        // A drawer still open: wait for it (a few days at most).
+        if (openDays.has(day) && day >= addDays(today, -WAIT_OPEN_DAYS)) continue;
+        const locs = byDay.get(day) || new Map();
         for (const loc of locations) {
-          const a = amounts.get(`${loc}|${day}`) || { rounded: 0, net: 0 };
-          // An archived row keeps its System amount.
+          const drawers = locs.get(loc) || new Map();
+          let expected = 0;
+          let removed = 0;
+          for (const [drawerId, d] of drawers) {
+            expected += d.ending - d.opening;
+            removed += d.removed;
+            await client.query(
+              `INSERT INTO cash_drawer_days (location, pay_date, drawer_id, drawer_name, opening_cents, ending_cents, removed_cents, sessions)
+               VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8)
+               ON CONFLICT (location, pay_date, drawer_id) DO UPDATE SET drawer_name = EXCLUDED.drawer_name,
+                 opening_cents = EXCLUDED.opening_cents, ending_cents = EXCLUDED.ending_cents,
+                 removed_cents = EXCLUDED.removed_cents, sessions = EXCLUDED.sessions`,
+              [loc, day, drawerId, d.name, d.opening, d.ending, d.removed, d.sessions]
+            );
+          }
+          // A deposited day keeps its amounts.
           await client.query(
-            `INSERT INTO cash_payments (location, pay_date, system_cents, unrounded_cents) VALUES ($1, $2::date, $3, $4)
-             ON CONFLICT (location, pay_date) DO UPDATE SET system_cents = EXCLUDED.system_cents,
-               unrounded_cents = EXCLUDED.unrounded_cents, updated_at = NOW()
-             WHERE cash_payments.archived_at IS NULL`,
-            [loc, day, a.rounded, a.net]
+            `INSERT INTO cash_payments (location, pay_date, expected_cents, removed_cents) VALUES ($1, $2::date, $3, $4)
+             ON CONFLICT (location, pay_date) DO UPDATE SET expected_cents = EXCLUDED.expected_cents,
+               removed_cents = EXCLUDED.removed_cents, updated_at = NOW()
+             WHERE cash_payments.deposit_id IS NULL`,
+            [loc, day, expected, removed]
           );
         }
         await client.query(
@@ -174,9 +252,9 @@ async function syncOnce() {
            ON CONFLICT (pay_date) DO UPDATE SET fetched_at = NOW()`,
           [day]
         );
+        fetchedDays += 1;
       }
       await client.query('COMMIT');
-      fetchedDays += chunk.length;
     } catch (e) {
       await client.query('ROLLBACK').catch(() => {});
       throw e;
@@ -193,7 +271,7 @@ function syncSystemAmounts(reason = '') {
   if (!running) {
     running = syncOnce()
       .then((r) => {
-        if (r.fetchedDays) console.log(`[cash-payments] System amounts fetched for ${r.fetchedDays} day(s)${reason ? ` (${reason})` : ''}`);
+        if (r.fetchedDays) console.log(`[cash-payments] drawer cash fetched for ${r.fetchedDays} day(s)${reason ? ` (${reason})` : ''}`);
         return r;
       })
       .catch((e) => {
@@ -207,6 +285,39 @@ function syncSystemAmounts(reason = '') {
 
 function isSyncRunning() { return !!running; }
 
+// ─── deposits ───────────────────────────────────────────────────────────────
+const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+
+// Creates a deposit for `location` dated today (Toronto) inside the given client
+// (transaction). Same base already used this year → the first one becomes -A,
+// later ones -B, -C… → returns the new deposit row.
+async function createDeposit(client, location, note, { isTest = false, createdAt = null } = {}) {
+  const day = createdAt ? torontoDay(createdAt) : torontoToday();
+  const [y, m, d] = day.split('-').map(Number);
+  const base = `${location}-${MONTHS[m - 1]}-${String(d).padStart(2, '0')}`;
+  await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`cash_deposit|${base}|${y}`]).catch(() => {});
+  const same = await client.query(
+    `SELECT id, suffix FROM cash_deposits WHERE title_base = $1 AND title_year = $2 ORDER BY id`,
+    [base, y]
+  );
+  let suffix = null;
+  if (same.rows.length) {
+    if (same.rows.length === 1 && !same.rows[0].suffix) {
+      await client.query(`UPDATE cash_deposits SET suffix = 'A' WHERE id = $1`, [same.rows[0].id]);
+    }
+    suffix = String.fromCharCode(65 + same.rows.length); // 1 existing → B, 2 → C …
+  }
+  const ins = await client.query(
+    `INSERT INTO cash_deposits (location, title_base, title_year, suffix, note, created_at, is_test)
+     VALUES ($1, $2, $3, $4, $5, COALESCE($6::timestamptz, NOW()), $7) RETURNING *`,
+    [location, base, y, suffix, note || null, createdAt, isTest]
+  );
+  return ins.rows[0];
+}
+
 module.exports = {
-  syncSystemAmounts, isSyncRunning, getStartingDate, torontoToday, addDays, isIsoDate, activeLocations,
+  createDeposit,
+  syncSystemAmounts, isSyncRunning, getStartingDate, torontoToday, torontoDay, addDays, isIsoDate, activeLocations,
+  // exported for tests
+  groupSessions, removedOf, torontoMidnight,
 };

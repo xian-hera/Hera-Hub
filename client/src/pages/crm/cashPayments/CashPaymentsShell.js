@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Page, Card, BlockStack, Button, Text, InlineStack, Banner } from '@shopify/polaris';
-import { useNavigate } from 'react-router-dom';
+import { Page, Card, BlockStack, Button, Text, InlineStack, Banner, Modal, TextField } from '@shopify/polaris';
+import { useNavigate, Navigate } from 'react-router-dom';
 import { useLocationMap } from '../../shared/locationMap';
 import { api, loadMyGroupId, chooseMyGroup, forgetMyGroup, compareLocations, ADMIN_ID, newVisit } from './cashShared';
 
@@ -12,8 +12,11 @@ import { api, loadMyGroupId, chooseMyGroup, forgetMyGroup, compareLocations, ADM
 // User group: the first time a Shopify account opens Cash Payments it picks a
 // group (or Admin = every location). Remembered for the account (server) and
 // this device (localStorage), until Settings › Log out. A group only sees its
-// own locations in Collect and Audit; it changes nothing else (Settings is
-// open to everyone).
+// own locations in Collect.
+// Admin (2026-11-20, Hera): choosing Admin asks for the Admin password (set in
+// Settings; none set yet → no password). Only Admin opens Audit (the tab is
+// hidden for other groups) and the full Settings (other groups see only Log
+// out there).
 
 export const CASH_TABS = [
   { id: 'collect', label: 'Collect', path: '/crm/cash-payments' },
@@ -25,11 +28,11 @@ export const CASH_TABS = [
 let visitState = null; // { settings, groupId }
 export function leaveCashPayments() { visitState = null; newVisit(); }
 
-function TabBar({ tab, onSelect }) {
+function TabBar({ tab, onSelect, isAdmin }) {
   return (
     <div style={{ borderBottom: '1px solid #e1e3e5', marginBottom: 4 }}>
       <InlineStack gap="100" wrap>
-        {CASH_TABS.map(t => {
+        {CASH_TABS.filter(t => isAdmin || t.id !== 'audit').map(t => {
           const active = t.id === tab;
           return (
             <button key={t.id} type="button" onClick={() => onSelect(t)}
@@ -47,13 +50,22 @@ function TabBar({ tab, onSelect }) {
   );
 }
 
-function ChooseGroup({ groups, onChosen, onBack }) {
+function ChooseGroup({ groups, adminPinSet, onChosen, onBack }) {
   const [busy, setBusy] = useState(null);
-  const pick = async (gid) => {
-    setBusy(gid);
-    await chooseMyGroup(gid);
+  const [askPin, setAskPin] = useState(false);
+  const [pin, setPin] = useState('');
+  const [pinError, setPinError] = useState('');
+  const pick = async (gid, pinValue) => {
+    setBusy(gid); setPinError('');
+    const r = await chooseMyGroup(gid, pinValue);
     setBusy(null);
-    onChosen(gid);
+    if (r.ok) { setAskPin(false); onChosen(gid); return; }
+    if (r.wrongPin) { setPinError('Incorrect password. Please try again.'); setPin(''); return; }
+    setPinError(r.error || 'Something went wrong');
+  };
+  const chooseAdmin = () => {
+    if (!adminPinSet) { pick(ADMIN_ID, ''); return; }
+    setPin(''); setPinError(''); setAskPin(true);
   };
   return (
     <Page title="Choose User Group" backAction={{ onAction: onBack }} narrowWidth>
@@ -65,11 +77,36 @@ function ChooseGroup({ groups, onChosen, onBack }) {
               {g.name}
             </Button>
           ))}
-          <Button size="large" fullWidth onClick={() => pick(ADMIN_ID)} loading={busy === ADMIN_ID} disabled={busy !== null}>
+          <Button size="large" fullWidth onClick={chooseAdmin} loading={busy === ADMIN_ID && !askPin} disabled={busy !== null}>
             Admin
           </Button>
+          {pinError && !askPin && <Banner tone="critical">{pinError}</Banner>}
         </BlockStack>
       </Card>
+      <Modal
+        open={askPin}
+        onClose={() => setAskPin(false)}
+        title="Admin password"
+        primaryAction={{ content: 'Confirm', onAction: () => pick(ADMIN_ID, pin), disabled: !pin || busy !== null, loading: busy === ADMIN_ID }}
+        secondaryActions={[{ content: 'Cancel', onAction: () => setAskPin(false) }]}
+      >
+        <Modal.Section>
+          <BlockStack gap="300">
+            {pinError && <Banner tone="critical" onDismiss={() => setPinError('')}>{pinError}</Banner>}
+            {/* Enter = Confirm (key handler on the wrapper; works whatever TextField passes on) */}
+            <div onKeyDown={(e) => { if (e.key === 'Enter' && pin) pick(ADMIN_ID, pin); }}>
+              <TextField
+                label="Enter the Admin password"
+                type="password"
+                value={pin}
+                onChange={(v) => { if (/^\d{0,8}$/.test(v)) setPin(v); setPinError(''); }}
+                autoComplete="off"
+                autoFocus
+              />
+            </div>
+          </BlockStack>
+        </Modal.Section>
+      </Modal>
     </Page>
   );
 }
@@ -136,6 +173,7 @@ export default function CashPaymentsShell({ tab = 'collect', children }) {
     return (
       <ChooseGroup
         groups={state.settings.groups || []}
+        adminPinSet={!!state.settings.adminPinSet}
         onBack={back}
         onChosen={(gid) => { visitState = { ...state, groupId: gid }; setState(visitState); }}
       />
@@ -145,11 +183,14 @@ export default function CashPaymentsShell({ tab = 'collect', children }) {
   const group = state.groupId === ADMIN_ID
     ? { id: ADMIN_ID, name: 'Admin' }
     : (state.settings.groups || []).find(x => Number(x.id) === state.groupId);
+  const isAdmin = state.groupId === ADMIN_ID;
+  // Audit is Admin only → others go to Collect.
+  if (tab === 'audit' && !isAdmin) return <Navigate to="/crm/cash-payments" replace />;
 
   return (
     <>
       <Page title="Cash Payments" backAction={{ onAction: back }}>
-        <TabBar tab={tab} onSelect={(t) => { if (t.id !== tab) navigate(t.path); }} />
+        <TabBar tab={tab} isAdmin={isAdmin} onSelect={(t) => { if (t.id !== tab) navigate(t.path); }} />
         {/* Preview & Test Mode (2026-11-19, temporary — remove after live testing) */}
         {state.settings.test && state.settings.test.on && (
           <div style={{ marginTop: 12 }}>
@@ -157,7 +198,7 @@ export default function CashPaymentsShell({ tab = 'collect', children }) {
           </div>
         )}
       </Page>
-      {children({ settings: state.settings, group, locations, allLocations, reloadSettings, logout })}
+      {children({ settings: state.settings, group, isAdmin, locations, allLocations, reloadSettings, logout })}
     </>
   );
 }

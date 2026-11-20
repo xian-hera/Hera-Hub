@@ -19,8 +19,9 @@ api_version = "2026-04"
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
 # write_discounts added 2026-11-12 (Employee Discount: Hub creates / updates the automatic discount)
-# read_reports added 2026-11-19 (Operation › Cash Payments: ShopifyQL cash net payments per store per day)
-scopes = "read_reports,read_all_orders,read_customers,write_customers,read_discounts,write_discounts,read_files,write_files,write_inventory,read_inventory,write_inventory_shipments,read_inventory_shipments,write_inventory_transfers,read_inventory_transfers,read_locations,read_orders,read_products,write_products,read_publications,write_publications,read_store_credit_account_transactions,write_store_credit_account_transactions,read_store_credit_accounts,read_translations,write_app_proxy,write_inventory_shipments_received_items,read_inventory_shipments_received_items"
+# read_reports added 2026-11-19 (Cash Payments: ShopifyQL cash net payments) — replaced 2026-11-20 by
+# read_cash_tracking (Cash Payments: POS drawer sessions — Ending / Removed cash per drawer)
+scopes = "read_cash_tracking,read_all_orders,read_customers,write_customers,read_discounts,write_discounts,read_files,write_files,write_inventory,read_inventory,write_inventory_shipments,read_inventory_shipments,write_inventory_transfers,read_inventory_transfers,read_locations,read_orders,read_products,write_products,read_publications,write_publications,read_store_credit_account_transactions,write_store_credit_account_transactions,read_store_credit_accounts,read_translations,write_app_proxy,write_inventory_shipments_received_items,read_inventory_shipments_received_items"
 use_legacy_install_flow = false
 
 # Wig Try-on (2026-11-05): storefront widget -> Hub. herabeauty.ca/apps/hera-tryon/* is

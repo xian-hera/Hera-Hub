@@ -63,6 +63,26 @@ export function addDays(iso, n) {
   return t.toISOString().slice(0, 10);
 }
 export function maxIso(a, b) { return a > b ? a : b; }
+
+// Deposit timestamp (Toronto): '26.JAN.05. Tue 12:30'; short day: 'Jan.05'.
+const MON_UP = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+function torontoParts(ts) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Toronto', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false, weekday: 'short',
+  }).formatToParts(new Date(ts));
+  const g = (t) => (parts.find(p => p.type === t) || {}).value || '';
+  return { y: g('year'), m: Number(g('month')), d: g('day'), h: g('hour') === '24' ? '00' : g('hour'), min: g('minute'), wd: g('weekday').replace('.', '') };
+}
+export function depositStamp(ts) {
+  if (!ts) return '';
+  const p = torontoParts(ts);
+  return `${p.y.slice(2)}.${MON_UP[p.m - 1]}.${p.d}. ${p.wd} ${p.h}:${p.min}`;
+}
+export function depositDay(ts) {
+  if (!ts) return '';
+  const p = torontoParts(ts);
+  return `${MONTHS[p.m - 1]}.${p.d}`;
+}
 const toLocalDate = (iso) => { const [y, m, d] = iso.split('-').map(Number); return new Date(y, m - 1, d); };
 const toIso = (dt) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
 
@@ -131,11 +151,20 @@ export async function loadMyGroupId(groups) {
   if (valid) lsSet(LS_GROUP, String(gid)); else { lsRemove(LS_GROUP); gid = null; }
   return gid;
 }
-export async function chooseMyGroup(gid) {
+// Admin needs the Admin password (2026-11-20). → { ok } / { ok: false, wrongPin } / { ok: false, error }
+export async function chooseMyGroup(gid, pin) {
+  try {
+    const r = await fetchWithAccount('/api/cash-payments/groups/my', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ groupId: gid, pin }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (r.status === 403 && d.wrongPin) return { ok: false, wrongPin: true };
+    if (!r.ok) return { ok: false, error: d.error || 'Something went wrong' };
+  } catch (e) {
+    return { ok: false, error: 'Network error. Please try again.' };
+  }
   lsSet(LS_GROUP, String(gid));
-  await getJson('/api/cash-payments/groups/my', {
-    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ groupId: gid }),
-  });
+  return { ok: true };
 }
 export async function forgetMyGroup() {
   lsRemove(LS_GROUP);
@@ -317,7 +346,9 @@ export const PILLS = [
   { id: 'collected', label: 'Collected' },
   { id: 'pending', label: 'Pending' },
   { id: 'mismatch', label: 'Mismatch' },
-  { id: 'archived', label: 'Archived' },
+  // 2026-11-20: Archived → Deposited + Not deposited yet
+  { id: 'deposited', label: 'Deposited' },
+  { id: 'notdeposited', label: 'Not deposited yet' },
 ];
 export function FilterPills({ counts, value, onChange }) {
   return (
