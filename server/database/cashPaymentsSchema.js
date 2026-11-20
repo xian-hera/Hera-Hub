@@ -30,6 +30,10 @@ async function ensureCashPaymentsTables(client) {
     )
   `);
   await client.query(`CREATE INDEX IF NOT EXISTS cash_payments_date_idx ON cash_payments (pay_date)`);
+  // System = Shopify's ROUNDED cash net payments (2026-11-20, Hera — Canadian
+  // cash is rounded to 5 cents); unrounded_cents keeps the amount before
+  // rounding for the "Rounded from …" tooltip. NULL on rows fetched before.
+  await client.query(`ALTER TABLE cash_payments ADD COLUMN IF NOT EXISTS unrounded_cents BIGINT`);
   // Preview & Test Mode fake rows (2026-11-19, temporary — services/cashPaymentsTest.js).
   await client.query(`ALTER TABLE cash_payments ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE`);
   await client.query(`

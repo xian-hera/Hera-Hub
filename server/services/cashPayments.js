@@ -1,7 +1,13 @@
 // Cash Payments — System amounts from Shopify (2026-11-19, Hera —
 // claude/CASH_PAYMENTS_SPEC.md).
 //
-// System = Shopify's cash "net payments" of one POS location on one day. Same
+// System = Shopify's cash net payments of one POS location on one day,
+// ROUNDED the way the cash was (rounded_net_payments — Canadian cash is
+// rounded to 5 cents; changed 2026-11-20, Hera: plain net_payments made almost
+// every day a few-cents Mismatch). The unrounded net_payments is kept too
+// (unrounded_cents) for the "Rounded from …" tooltip. Diffs use the rounded
+// System. POS "Remove cash" is a drawer adjustment, not a payment, so it is
+// NOT in these numbers (confirmed by Shopify support 2026-11-20). Same
 // numbers as Hera's report "All Stores Payments by gateway summary" (FROM
 // payments … transaction_kind IN sale/change/capture/refund), Payment gateway
 // "Cash", but grouped by day so many days come back in one query.
@@ -69,10 +75,10 @@ const SHOPIFYQL = `query CashPayments($q: String!) {
   }
 }`;
 
-// → Map 'LOC|YYYY-MM-DD' → cents, for days from..to (inclusive).
+// → Map 'LOC|YYYY-MM-DD' → { rounded, net } cents, for days from..to (inclusive).
 async function fetchCashByDay(from, to) {
   const q = `FROM payments
-  SHOW net_payments
+  SHOW net_payments, rounded_net_payments
   WHERE transaction_kind IN ('sale', 'change', 'capture', 'refund')
     AND payment_gateway = 'Cash'
   GROUP BY pos_location_name, day
@@ -91,6 +97,7 @@ async function fetchCashByDay(from, to) {
   const iLoc = cols.indexOf('pos_location_name');
   const iDay = cols.indexOf('day');
   const iAmt = cols.indexOf('net_payments');
+  const iRnd = cols.indexOf('rounded_net_payments');
   let rows = table.rows;
   if (typeof rows === 'string') { try { rows = JSON.parse(rows); } catch (e) { rows = []; } }
   const out = new Map();
@@ -99,9 +106,13 @@ async function fetchCashByDay(from, to) {
     const loc = Array.isArray(row) ? row[iLoc] : row.pos_location_name;
     const day = String((Array.isArray(row) ? row[iDay] : row.day) || '').slice(0, 10);
     const amt = Array.isArray(row) ? row[iAmt] : row.net_payments;
+    const rnd = Array.isArray(row) ? (iRnd >= 0 ? row[iRnd] : null) : row.rounded_net_payments;
     if (!loc || !isIsoDate(day)) continue;
     const key = `${loc}|${day}`;
-    out.set(key, (out.get(key) || 0) + toCents(amt));
+    const net = toCents(amt);
+    const rounded = rnd === null || rnd === undefined || rnd === '' ? net : toCents(rnd);
+    const cur = out.get(key) || { rounded: 0, net: 0 };
+    out.set(key, { rounded: cur.rounded + rounded, net: cur.net + net });
   }
   if (Array.isArray(rows) && rows.length >= 1000) {
     console.warn(`[cash-payments] ${from}..${to}: 1000 rows returned — some may be missing; lower CHUNK_DAYS`);
@@ -148,13 +159,14 @@ async function syncOnce() {
       await client.query('BEGIN');
       for (const day of chunk) {
         for (const loc of locations) {
-          const cents = amounts.get(`${loc}|${day}`) || 0;
+          const a = amounts.get(`${loc}|${day}`) || { rounded: 0, net: 0 };
           // An archived row keeps its System amount.
           await client.query(
-            `INSERT INTO cash_payments (location, pay_date, system_cents) VALUES ($1, $2::date, $3)
-             ON CONFLICT (location, pay_date) DO UPDATE SET system_cents = EXCLUDED.system_cents, updated_at = NOW()
+            `INSERT INTO cash_payments (location, pay_date, system_cents, unrounded_cents) VALUES ($1, $2::date, $3, $4)
+             ON CONFLICT (location, pay_date) DO UPDATE SET system_cents = EXCLUDED.system_cents,
+               unrounded_cents = EXCLUDED.unrounded_cents, updated_at = NOW()
              WHERE cash_payments.archived_at IS NULL`,
-            [loc, day, cents]
+            [loc, day, a.rounded, a.net]
           );
         }
         await client.query(

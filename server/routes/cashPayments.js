@@ -118,10 +118,13 @@ function shapeRow(r) {
   if (archived) status = 'archived';
   else if (noCash && !collected) status = 'nocash';
   else if (collected) status = mismatch ? 'mismatch' : 'matched';
+  // Unrounded Shopify amount, only when it differs from System (rounded).
+  const unrounded = r.unrounded_cents === null || r.unrounded_cents === undefined ? null : Number(r.unrounded_cents);
   return {
     location: r.location,
     date: r.d,
     system,
+    systemUnrounded: unrounded !== null && unrounded !== system ? unrounded : null,
     declared,
     counted,
     diffs,
@@ -329,7 +332,7 @@ router.get('/rows', async (req, res) => {
     if (!locations.length || !range) return res.json({ ...empty, startingDate: start, today, yesterday, range });
 
     const r = await pool.query(
-      `SELECT location, to_char(pay_date, 'YYYY-MM-DD') AS d, system_cents, declared_cents, counted_cents, note, archived_at
+      `SELECT location, to_char(pay_date, 'YYYY-MM-DD') AS d, system_cents, unrounded_cents, declared_cents, counted_cents, note, archived_at
          FROM cash_payments
         WHERE location = ANY($1::text[]) AND pay_date BETWEEN $2::date AND $3::date`,
       [locations, range.from, range.to]
@@ -366,7 +369,7 @@ router.get('/rows', async (req, res) => {
 
 async function loadRow(location, date) {
   const r = await pool.query(
-    `SELECT location, to_char(pay_date, 'YYYY-MM-DD') AS d, system_cents, declared_cents, counted_cents, note, archived_at
+    `SELECT location, to_char(pay_date, 'YYYY-MM-DD') AS d, system_cents, unrounded_cents, declared_cents, counted_cents, note, archived_at
        FROM cash_payments WHERE location = $1 AND pay_date = $2::date`,
     [location, date]
   );

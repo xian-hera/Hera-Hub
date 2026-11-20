@@ -193,7 +193,12 @@ export default function CashTable({ rows, currentYear, showLocation, editable, c
             <tr>
               {showLocation && <th style={{ ...TH, textAlign: txt }}>Location</th>}
               <th style={{ ...TH, textAlign: txt }}>Date</th>
-              <th style={{ ...TH, textAlign: amt }}><span style={HEAD_PILL}>System</span></th>
+              {/* System = Shopify's rounded cash net payments (2026-11-20) */}
+              <th style={{ ...TH, textAlign: amt }}>
+                <Tooltip content="Value could be rounded" preferredPosition="above">
+                  <span style={{ ...HEAD_PILL, cursor: 'default' }}>System</span>
+                </Tooltip>
+              </th>
               <th style={{ ...TH, textAlign: amt }}>← Diff. →</th>
               <th style={{ ...TH, textAlign: amt }}><span style={HEAD_PILL}>Declared</span></th>
               <th style={{ ...TH, textAlign: amt }}>← Diff. →</th>
@@ -217,7 +222,15 @@ export default function CashTable({ rows, currentYear, showLocation, editable, c
                 <tr key={`${row.location}|${row.date}`} style={rowStyle}>
                   {showLocation && <td style={{ ...TD, textAlign: txt }}><LocPill name={row.location} /></td>}
                   <DateCell iso={row.date} currentYear={currentYear} align={txt} />
-                  <td style={{ ...TD, ...NUM, textAlign: amt, color: grey ? '#8a8a8a' : '#303030' }}><span style={SYS_PILL}>{fmtMoney(row.system)}</span></td>
+                  <td style={{ ...TD, ...NUM, textAlign: amt, color: grey ? '#8a8a8a' : '#303030' }}>
+                    {row.systemUnrounded !== null && row.systemUnrounded !== undefined
+                      ? (
+                        <Tooltip content={`Rounded from ${fmtMoney(row.systemUnrounded)}`} preferredPosition="above">
+                          <span style={{ ...SYS_PILL, cursor: 'default' }}>{fmtMoney(row.system)}</span>
+                        </Tooltip>
+                      )
+                      : <span style={SYS_PILL}>{fmtMoney(row.system)}</span>}
+                  </td>
                   <DiffCell cents={row.diffs.declaredVsSystem} dim={grey} align={amt} />
                   <td style={{ ...TD, ...NUM, textAlign: amt, color: grey ? '#8a8a8a' : undefined }}>
                     {inputs

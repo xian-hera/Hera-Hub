@@ -65,8 +65,10 @@ const NOTES = [
 // One fake row. kind: 'filled' | 'pending'
 function fakeRow(kind) {
   const noCash = Math.random() < 0.06;
-  const system = noCash ? 0 : rnd(15000, 250000);
-  if (kind === 'pending' || noCash) return { system, declared: null, counted: null, note: null };
+  // System is rounded to 5 cents like the real one; unrounded = a few cents off.
+  const system = noCash ? 0 : rnd(3000, 50000) * 5;
+  const unrounded = noCash ? 0 : system + rnd(-2, 2);
+  if (kind === 'pending' || noCash) return { system, unrounded, declared: null, counted: null, note: null };
   let declared = system;
   let counted = system;
   let note = null;
@@ -78,7 +80,7 @@ function fakeRow(kind) {
     if (declared === system && counted === system) counted = system + 100;
     if (Math.random() < 0.4) note = pick(NOTES);
   }
-  return { system, declared, counted, note };
+  return { system, unrounded, declared, counted, note };
 }
 
 async function insertRows(client, locations, days, kindOf, archivedUntil) {
@@ -89,10 +91,10 @@ async function insertRows(client, locations, days, kindOf, archivedUntil) {
       const archived = kind === 'filled' && archivedUntil && day <= archivedUntil;
       // Never overwrite a real row.
       await client.query(
-        `INSERT INTO cash_payments (location, pay_date, system_cents, declared_cents, counted_cents, note, archived_at, is_test)
-         VALUES ($1, $2::date, $3, $4, $5, $6, ${archived ? 'NOW()' : 'NULL'}, TRUE)
+        `INSERT INTO cash_payments (location, pay_date, system_cents, unrounded_cents, declared_cents, counted_cents, note, archived_at, is_test)
+         VALUES ($1, $2::date, $3, $7, $4, $5, $6, ${archived ? 'NOW()' : 'NULL'}, TRUE)
          ON CONFLICT (location, pay_date) DO NOTHING`,
-        [loc, day, r.system, r.declared, r.counted, r.note]
+        [loc, day, r.system, r.declared, r.counted, r.note, r.unrounded]
       );
     }
   }
