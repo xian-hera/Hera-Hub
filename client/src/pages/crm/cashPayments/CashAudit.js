@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Page, Card, BlockStack, InlineStack, Banner, Text, Popover } from '@shopify/polaris';
+import { Page, Card, BlockStack, InlineStack, Banner, Text, Popover, Button } from '@shopify/polaris';
 import MultiSelectDropdown from '../../../components/MultiSelectDropdown';
 import { DetailTable, DepositTable } from './CashTable';
 import {
@@ -19,6 +19,24 @@ import {
 // Amounts are read-only here; notes (day and deposit) can be edited.
 
 const PAGE_SIZE = 50;
+
+// "Back to top" (2026-11-20, Hera): fixed at the top right of the screen,
+// outside the page width; shows once the page has been scrolled down.
+function BackToTop() {
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    const onScroll = () => setShow(window.scrollY > 300);
+    onScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
+  if (!show) return null;
+  return (
+    <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 400 }}>
+      <Button onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}>↑ Back to top</Button>
+    </div>
+  );
+}
 let memo = null; // { selected, custom, mode, filter } for the visit
 
 export default function CashAudit({ settings, locations }) {
@@ -90,6 +108,7 @@ export default function CashAudit({ settings, locations }) {
 
   return (
     <Page>
+      <BackToTop />
       <BlockStack gap="400">
         {error && <Banner tone="critical" onDismiss={() => setError('')}>{error}</Banner>}
 

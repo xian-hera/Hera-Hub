@@ -6,9 +6,10 @@ import { fmtMoney, fmtDiff, parseMoney, dateParts, depositStamp, depositDay, SUB
 // Cash Payments tables (2026-11-19, Hera; drawer-based since 2026-11-20).
 //
 //   CollectTable  ☐ | Date | Expected | Removed | Diff. | Counted | Receipted removed | Removed diff. | Status | Note
-//   DetailTable   Location | Date | Drawer · Ending · Removed (one line per drawer) | Diff. | Counted |
-//                 Receipted removed | Removed diff. | Status | Note          (Audit, read-only but notes)
-//   DepositTable  Deposit | Date | Expected | Counted | Removed | Removed Diff. | Note   (Audit)
+//   DetailTable   Location | Date | Drawer · Ending · Removed (one line per drawer) | Total Ending |
+//                 ← Diff. → | Counted | Total removed | ← Diff. → | Receipted removed | Status
+//                 (+ the note on a line under the row)          (Audit, read-only but notes)
+//   DepositTable  Deposit | Date | Expected | ← Diff. → | Counted | Removed | ← Diff. → | Receipted | Note
 //
 // Expected = Σ drawers (Ending − cash at open); Removed = Σ cash removed;
 // Diff. = Counted − Expected; Removed diff. = Receipted removed − Removed
@@ -285,19 +286,40 @@ export function CollectTable({ rows, currentYear, selected, onSelect, onSaveAmou
   );
 }
 
+// ─── Audit: shared bits (2026-11-20 layout, Hera) ────────────────────────────
+// Amount shown in the Audit tables: null → nothing, 0 → "-" (no pill),
+// otherwise the amount (in a pill when asked, bold when entered by finance).
+function Amt({ cents, pill, bold }) {
+  if (cents === null || cents === undefined) return null;
+  if (cents === 0) return <span style={{ color: '#8a8a8a' }}>-</span>;
+  const style = { ...(pill ? VAL_PILL : NUM), ...(bold ? ENTERED : null) };
+  return <span style={style}>{fmtMoney(cents)}</span>;
+}
+// "← Diff. →" header between the two columns it compares.
+const ARROW_DIFF = '← Diff. →';
+
 // ─── Audit › detail list ────────────────────────────────────────────────────
-const D_COLS = [74, 88, 214, 76, 90, 96, 88, 96, 110];
-const DRAWER_GRID = { display: 'grid', gridTemplateColumns: '52px 1fr 1fr', alignItems: 'center', columnGap: 6 };
+// Location | Date | Drawer · Ending · Removed | Total Ending | ← Diff. → |
+// Counted | Total removed | ← Diff. → | Receipted removed | Status
+// The day's note sits on its own line under the row (left), making the row
+// taller; without a note, "Add note" sits under the Location pill.
+// Total Ending = Expected (Σ drawer Ending − opening float), so the Diff. next
+// to it is the same Diff. as in Collect.
+// Sum ≈ 890 px so the list fits the normal page width (long headers wrap).
+const D_COLS = [76, 84, 184, 80, 64, 84, 80, 64, 84, 92];
+const TH_WRAP = { ...TH, whiteSpace: 'normal', lineHeight: '15px' };
+const DRAWER_GRID = { display: 'grid', gridTemplateColumns: '48px 1fr 1fr', alignItems: 'center', columnGap: 6 };
+const NO_LINE = { borderBottom: 'none' };
 
 function DrawerBox({ drawers, grey }) {
-  if (!drawers || drawers.length === 0) return <span style={{ color: '#8a8a8a' }}>—</span>;
+  if (!drawers || drawers.length === 0) return <span style={{ color: '#8a8a8a' }}>-</span>;
   return (
     <div style={{ background: grey ? '#efefef' : '#f1f1f1', borderRadius: 10, padding: '6px 8px', display: 'flex', flexDirection: 'column', gap: 4 }}>
       {drawers.map(d => (
         <div key={d.id} style={DRAWER_GRID}>
           <span style={{ justifySelf: 'start', padding: '1px 8px', borderRadius: 999, background: '#e3e3e3', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap' }}>{d.name}</span>
-          <span style={{ ...NUM, textAlign: 'right' }}>{d.ending === null ? '—' : fmtMoney(d.ending)}</span>
-          <span style={{ ...NUM, textAlign: 'right' }}>{fmtMoney(d.removed)}</span>
+          <span style={{ ...NUM, textAlign: 'right' }}><Amt cents={d.ending} /></span>
+          <span style={{ ...NUM, textAlign: 'right' }}><Amt cents={d.removed} /></span>
         </div>
       ))}
     </div>
@@ -306,6 +328,7 @@ function DrawerBox({ drawers, grey }) {
 
 export function DetailTable({ rows, currentYear, onSaveNote, emptyText }) {
   const notes = useRowNotes(onSaveNote);
+  const cols = D_COLS.length;
   return (
     <>
       <div style={{ overflowX: 'auto' }}>
@@ -313,41 +336,63 @@ export function DetailTable({ rows, currentYear, onSaveNote, emptyText }) {
           <colgroup>{D_COLS.map((w, i) => <col key={i} style={{ width: w }} />)}</colgroup>
           <thead>
             <tr>
-              <th style={TH}>Location</th>
-              <th style={TH}>Date</th>
-              <th style={TH}>
+              <th style={TH_WRAP}>Location</th>
+              <th style={TH_WRAP}>Date</th>
+              <th style={TH_WRAP}>
                 <div style={{ ...DRAWER_GRID, padding: '0 8px' }}>
                   <span style={{ justifySelf: 'start' }}>Drawer</span>
                   <span style={{ textAlign: 'right' }}><Head tip="Ending Cash counted at close (opening float included)">Ending</Head></span>
                   <span style={{ textAlign: 'right' }}><Head tip="Cash removed from the drawer during the day">Removed</Head></span>
                 </div>
               </th>
-              <th style={TH}><Head tip="Difference between Expected and Counted">Diff.</Head></th>
-              <th style={TH}><Head pill>Counted</Head></th>
-              <th style={TH}>Receipted removed</th>
-              <th style={TH}><Head tip="Receipted removed − Removed">Removed diff.</Head></th>
-              <th style={TH}>Status</th>
-              <th style={TH}>Note</th>
+              <th style={TH_WRAP}><Head tip="Total of Ending Cash from all drawers, minus the opening float.">Total Ending</Head></th>
+              <th style={TH_WRAP}><Head tip="Difference between Total Ending and Counted">{ARROW_DIFF}</Head></th>
+              <th style={TH_WRAP}><Head pill>Counted</Head></th>
+              <th style={TH_WRAP}><Head tip="Total of Removed Cash from all drawers">Total removed</Head></th>
+              <th style={TH_WRAP}><Head tip="Receipted removed − Total removed">{ARROW_DIFF}</Head></th>
+              <th style={TH_WRAP}>Receipted removed</th>
+              <th style={TH_WRAP}>Status</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 && (
-              <tr><td colSpan={D_COLS.length} style={{ ...TD, color: SUBDUED, padding: '24px 8px' }}>{emptyText || 'Nothing to show.'}</td></tr>
+              <tr><td colSpan={cols} style={{ ...TD, color: SUBDUED, padding: '24px 8px' }}>{emptyText || 'Nothing to show.'}</td></tr>
             )}
             {rows.map(row => {
               const grey = row.noCash;
+              const hasNote = !!row.note;
+              const td = hasNote ? { ...TD, ...NO_LINE } : TD; // the note line carries the row's bottom line
               return (
-                <tr key={rowKey(row)} style={grey ? GREY_ROW : undefined}>
-                  <td style={TD}><LocPill name={row.location} /></td>
-                  <DateCell iso={row.date} currentYear={currentYear} />
-                  <td style={TD}><DrawerBox drawers={row.drawers} grey={grey} /></td>
-                  <td style={{ ...TD, ...NUM }}><DiffText cents={row.diff} dim={grey} /></td>
-                  <td style={{ ...TD, ...NUM }}>{row.counted === null ? (grey ? '—' : '') : <span style={ENTERED}>{fmtMoney(row.counted)}</span>}</td>
-                  <td style={{ ...TD, ...NUM }}>{row.receipted === null ? '' : <span style={ENTERED}>{fmtMoney(row.receipted)}</span>}</td>
-                  <td style={{ ...TD, ...NUM }}><DiffText cents={row.removedDiff} dim={grey} /></td>
-                  <td style={TD}><StatusBadge row={row} /></td>
-                  <NoteCell note={row.note} onEdit={() => notes.edit(row)} onDelete={() => notes.del(row)} />
-                </tr>
+                <React.Fragment key={rowKey(row)}>
+                  <tr style={grey ? GREY_ROW : undefined}>
+                    <td style={td}>
+                      <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+                        <LocPill name={row.location} />
+                        {!hasNote && <button type="button" style={{ ...linkBtn('#8a8a8a'), fontSize: 12 }} onClick={() => notes.edit(row)}>Add note</button>}
+                      </div>
+                    </td>
+                    <DateCellStyled iso={row.date} currentYear={currentYear} style={td} />
+                    <td style={td}><DrawerBox drawers={row.drawers} grey={grey} /></td>
+                    <td style={{ ...td, ...NUM }}><Amt cents={row.expected} /></td>
+                    <td style={{ ...td, ...NUM }}><DiffText cents={row.diff} dim={grey} /></td>
+                    <td style={{ ...td, ...NUM }}><Amt cents={row.counted} bold /></td>
+                    <td style={{ ...td, ...NUM }}><Amt cents={row.removed} /></td>
+                    <td style={{ ...td, ...NUM }}><DiffText cents={row.removedDiff} dim={grey} /></td>
+                    <td style={{ ...td, ...NUM }}><Amt cents={row.receipted} bold /></td>
+                    <td style={td}><StatusBadge row={row} /></td>
+                  </tr>
+                  {hasNote && (
+                    <tr style={grey ? GREY_ROW : undefined}>
+                      <td colSpan={cols} style={{ ...TD, textAlign: 'left', paddingTop: 0, paddingLeft: 12 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                          <button type="button" aria-label="Delete note" title="Delete note" style={{ ...linkBtn(RED), fontSize: 15, lineHeight: '16px', flex: 'none' }} onClick={() => notes.del(row)}>×</button>
+                          <span style={{ fontSize: 12, lineHeight: '16px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', minWidth: 0 }}>{row.note}</span>
+                          <button type="button" style={{ ...linkBtn('#005bd3'), flex: 'none' }} onClick={() => notes.edit(row)}>Edit</button>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
               );
             })}
           </tbody>
@@ -358,8 +403,23 @@ export function DetailTable({ rows, currentYear, onSaveNote, emptyText }) {
   );
 }
 
+function DateCellStyled({ iso, currentYear, style }) {
+  const p = dateParts(iso);
+  return (
+    <td style={{ ...style, whiteSpace: 'nowrap' }}>
+      {p.year !== currentYear && <div style={{ fontSize: 11, color: SUBDUED, lineHeight: '14px' }}>{p.year}</div>}
+      <span style={{ fontWeight: 600 }}>{p.main}</span>
+      <span style={{ fontSize: 12, color: SUBDUED, marginLeft: 6 }}>{p.dow}</span>
+    </td>
+  );
+}
+
 // ─── Audit › deposit card ───────────────────────────────────────────────────
-const P_COLS = [150, 170, 104, 104, 96, 110, 160];
+// Deposit | Date | Expected | ← Diff. → | Counted | Removed | ← Diff. → | Receipted | Note
+// Deposit / Date are sized to their (fixed-length) values; the amount columns
+// sit close together; Note (left-aligned) takes the rest.
+const P_COLS = [116, 148, 84, 64, 84, 72, 64, 80]; // Note: no width → the remaining space
+const NOTE_PAD = { paddingRight: 16 };
 
 export function DepositTable({ deposits, onSaveNote, emptyText }) {
   const [editing, setEditing] = useState(null);
@@ -367,25 +427,28 @@ export function DepositTable({ deposits, onSaveNote, emptyText }) {
     if (!window.confirm('Delete this note?')) return;
     try { await onSaveNote(d, ''); } catch (e) { window.alert(e.message); }
   };
+  const cols = P_COLS.length + 1;
   return (
     <>
       <div style={{ overflowX: 'auto' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
-          <colgroup>{P_COLS.map((w, i) => <col key={i} style={{ width: w }} />)}</colgroup>
+          <colgroup>{P_COLS.map((w, i) => <col key={i} style={{ width: w }} />)}<col /></colgroup>
           <thead>
             <tr>
               <th style={TH}>Deposit</th>
               <th style={TH}>Date</th>
               <th style={TH}><Head pill tip="Total of Ending Cash in this deposit">Expected</Head></th>
+              <th style={TH}><Head tip="Counted − Expected">{ARROW_DIFF}</Head></th>
               <th style={TH}><Head pill tip="Total of Counted cash, which is the amount deposited to bank.">Counted</Head></th>
               <th style={TH}><Head pill tip="Total of Removed Cash">Removed</Head></th>
-              <th style={TH}><Head tip="Total of Difference between Removed Cash and Receipted">Removed Diff.</Head></th>
-              <th style={TH}>Note</th>
+              <th style={TH}><Head tip="Total of Difference between Removed Cash and Receipted">{ARROW_DIFF}</Head></th>
+              <th style={TH}><Head pill tip="Total of Receipted removed entered in Collect">Receipted</Head></th>
+              <th style={{ ...TH, textAlign: 'left', ...NOTE_PAD }}>Note</th>
             </tr>
           </thead>
           <tbody>
             {deposits.length === 0 && (
-              <tr><td colSpan={P_COLS.length} style={{ ...TD, color: SUBDUED, padding: '24px 8px' }}>{emptyText || 'No deposits.'}</td></tr>
+              <tr><td colSpan={cols} style={{ ...TD, color: SUBDUED, padding: '24px 8px' }}>{emptyText || 'No deposits.'}</td></tr>
             )}
             {deposits.map(d => (
               <tr key={d.id}>
@@ -393,11 +456,29 @@ export function DepositTable({ deposits, onSaveNote, emptyText }) {
                   <Tooltip content={`${d.days} day${d.days === 1 ? '' : 's'}`} preferredPosition="above"><span style={{ cursor: 'default' }}>{d.title}</span></Tooltip>
                 </td>
                 <td style={{ ...TD, ...NUM }}>{depositStamp(d.createdAt)}</td>
-                <td style={{ ...TD, ...NUM }}><span style={VAL_PILL}>{fmtMoney(d.expected)}</span></td>
-                <td style={{ ...TD, ...NUM }}><span style={{ ...VAL_PILL, ...ENTERED }}>{fmtMoney(d.counted)}</span></td>
-                <td style={{ ...TD, ...NUM }}><span style={VAL_PILL}>{fmtMoney(d.removed)}</span></td>
+                <td style={{ ...TD, ...NUM }}><Amt cents={d.expected} pill /></td>
+                <td style={{ ...TD, ...NUM }}><DiffText cents={d.counted - d.expected} /></td>
+                <td style={{ ...TD, ...NUM }}><Amt cents={d.counted} pill bold /></td>
+                <td style={{ ...TD, ...NUM }}><Amt cents={d.removed} pill /></td>
                 <td style={{ ...TD, ...NUM }}><DiffText cents={d.removedDiff} /></td>
-                <NoteCell note={d.note} onEdit={() => setEditing(d)} onDelete={() => del(d)} />
+                <td style={{ ...TD, ...NUM }}>{d.receipted === null ? <span style={{ color: '#8a8a8a' }}>-</span> : <Amt cents={d.receipted} pill />}</td>
+                {d.note ? (
+                  <td style={{ ...TD, textAlign: 'left', ...NOTE_PAD }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                      <div style={{ minWidth: 0, flex: '0 1 auto' }}>
+                        <Tooltip content={<div style={{ whiteSpace: 'pre-wrap', maxWidth: 320 }}>{d.note}</div>} preferredPosition="above">
+                          <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, lineHeight: '16px', cursor: 'default' }}>{d.note}</div>
+                        </Tooltip>
+                      </div>
+                      <button type="button" aria-label="Delete note" title="Delete note" style={{ ...linkBtn(RED), fontSize: 15, lineHeight: '16px', flex: 'none' }} onClick={() => del(d)}>×</button>
+                      <button type="button" style={{ ...linkBtn('#005bd3'), flex: 'none' }} onClick={() => setEditing(d)}>Edit</button>
+                    </div>
+                  </td>
+                ) : (
+                  <td style={{ ...TD, textAlign: 'left', ...NOTE_PAD }}>
+                    <button type="button" style={linkBtn('#8a8a8a')} onClick={() => setEditing(d)}>Add</button>
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>

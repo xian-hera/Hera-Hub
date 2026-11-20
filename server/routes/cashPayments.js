@@ -566,7 +566,9 @@ router.get('/deposits', async (req, res) => {
               COALESCE(SUM(p.expected_cents), 0)::bigint AS expected,
               COALESCE(SUM(p.counted_cents), 0)::bigint AS counted,
               COALESCE(SUM(p.removed_cents), 0)::bigint AS removed,
-              COALESCE(SUM(CASE WHEN p.receipted_cents IS NULL THEN 0 ELSE p.receipted_cents - p.removed_cents END), 0)::bigint AS removed_diff
+              COALESCE(SUM(CASE WHEN p.receipted_cents IS NULL THEN 0 ELSE p.receipted_cents - p.removed_cents END), 0)::bigint AS removed_diff,
+              COALESCE(SUM(p.receipted_cents), 0)::bigint AS receipted,
+              COUNT(p.receipted_cents)::int AS receipted_days
          FROM cash_deposits d JOIN cash_payments p ON p.deposit_id = d.id
         WHERE d.location = ANY($1::text[])
           AND d.id IN (SELECT deposit_id FROM cash_payments
@@ -586,6 +588,8 @@ router.get('/deposits', async (req, res) => {
         counted: Number(d.counted),
         removed: Number(d.removed),
         removedDiff: Number(d.removed_diff),
+        // Σ Receipted removed entered (null when no day has one) — 2026-11-20
+        receipted: d.receipted_days ? Number(d.receipted) : null,
         note: d.note || '',
       })),
     });
