@@ -577,6 +577,20 @@ router.get('/deposits', async (req, res) => {
         ORDER BY d.created_at DESC, d.id DESC`,
       [locations, range.from, range.to]
     );
+    // The days of each deposit (for the title tooltip), oldest first.
+    const ids = r.rows.map(d => d.id);
+    const daysOf = new Map();
+    if (ids.length) {
+      const dd = await pool.query(
+        `SELECT deposit_id, to_char(pay_date, 'YYYY-MM-DD') AS d FROM cash_payments
+          WHERE deposit_id = ANY($1::int[]) ORDER BY pay_date`,
+        [ids]
+      );
+      for (const x of dd.rows) {
+        if (!daysOf.has(x.deposit_id)) daysOf.set(x.deposit_id, []);
+        daysOf.get(x.deposit_id).push(x.d);
+      }
+    }
     res.json({
       deposits: r.rows.map(d => ({
         id: d.id,
@@ -584,6 +598,7 @@ router.get('/deposits', async (req, res) => {
         location: d.location,
         createdAt: d.created_at,
         days: d.days,
+        dates: daysOf.get(d.id) || [],
         expected: Number(d.expected),
         counted: Number(d.counted),
         removed: Number(d.removed),

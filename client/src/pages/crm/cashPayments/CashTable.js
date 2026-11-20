@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Badge, Tooltip, Modal, TextField, BlockStack, Banner } from '@shopify/polaris';
 import { LocPill } from '../../warehouse/whShared';
 import { fmtMoney, fmtDiff, parseMoney, dateParts, depositStamp, depositDay, SUBDUED, GREEN, RED } from './cashShared';
@@ -32,10 +32,33 @@ function Head({ children, pill, tip }) {
   return tip ? <Tooltip content={tip} preferredPosition="above">{inner}</Tooltip> : inner;
 }
 
+// Fit (2026-11-20, Hera): a value wider than its column is cut with "…"
+// (column widths never change); hovering it shows the whole value. No
+// tooltip when it fits.
+function Fit({ text, style }) {
+  const ref = useRef(null);
+  const [cut, setCut] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return undefined;
+    const check = () => setCut(el.scrollWidth > el.clientWidth + 1);
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, [text]);
+  const span = (
+    <span ref={ref} style={{
+      ...style, display: 'inline-block', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap', verticalAlign: 'middle', boxSizing: 'border-box', cursor: cut ? 'default' : undefined,
+    }}>{text}</span>
+  );
+  return cut ? <Tooltip content={text} preferredPosition="above">{span}</Tooltip> : span;
+}
+
 function DiffText({ cents, dim }) {
   const t = fmtDiff(cents);
   if (!t) return null;
-  return <span style={{ ...NUM, color: dim ? '#8a8a8a' : (cents > 0 ? GREEN : RED) }}>{t}</span>;
+  return <Fit text={t} style={{ ...NUM, color: dim ? '#8a8a8a' : (cents > 0 ? GREEN : RED) }} />;
 }
 
 // Deposited: the pill, and the deposit day in small text under it.
@@ -259,18 +282,19 @@ export function CollectTable({ rows, currentYear, selected, onSelect, onSaveAmou
                     <Checkbox label={`Select ${row.date}`} checked={ok && selected.has(rowKey(row))} disabled={!ok} onChange={(on) => toggle(row, on)} />
                   </td>
                   <DateCell iso={row.date} currentYear={currentYear} />
-                  <td style={{ ...TD, ...NUM, textAlign: 'right', paddingRight: 3 }}><span style={VAL_PILL}>{fmtMoney(row.expected)}</span></td>
-                  <td style={{ ...TD, ...NUM, textAlign: 'left', paddingLeft: 3 }}><span style={VAL_PILL}>{fmtMoney(row.removed)}</span></td>
+                  {/* 0 → "-" without a pill (2026-11-20) */}
+                  <td style={{ ...TD, ...NUM, textAlign: 'right', paddingRight: 3 }}><Amt cents={row.expected} pill /></td>
+                  <td style={{ ...TD, ...NUM, textAlign: 'left', paddingLeft: 3 }}><Amt cents={row.removed} pill /></td>
                   <td style={{ ...TD, ...NUM }}><DiffText cents={row.diff} dim={grey} /></td>
                   <td style={{ ...TD, ...NUM }}>
                     {inputs
                       ? <AmountInput cents={row.counted} label={`Counted ${row.date}`} onCommit={(c) => onSaveAmount(row, 'counted', c)} />
-                      : (row.counted === null ? '—' : <span style={ENTERED}>{fmtMoney(row.counted)}</span>)}
+                      : (row.counted === null ? <span style={{ color: '#8a8a8a' }}>-</span> : <Amt cents={row.counted} bold />)}
                   </td>
                   <td style={{ ...TD, ...NUM }}>
                     {inputs && (row.removed > 0 || row.receipted !== null)
                       ? <AmountInput cents={row.receipted} label={`Receipted removed ${row.date}`} onCommit={(c) => onSaveAmount(row, 'receipted', c)} />
-                      : (row.receipted === null ? '' : <span style={ENTERED}>{fmtMoney(row.receipted)}</span>)}
+                      : <Amt cents={row.receipted} bold />}
                   </td>
                   <td style={{ ...TD, ...NUM }}><DiffText cents={row.removedDiff} dim={grey} /></td>
                   <td style={TD}><StatusBadge row={row} /></td>
@@ -293,7 +317,7 @@ function Amt({ cents, pill, bold }) {
   if (cents === null || cents === undefined) return null;
   if (cents === 0) return <span style={{ color: '#8a8a8a' }}>-</span>;
   const style = { ...(pill ? VAL_PILL : NUM), ...(bold ? ENTERED : null) };
-  return <span style={style}>{fmtMoney(cents)}</span>;
+  return <Fit text={fmtMoney(cents)} style={style} />;
 }
 // "← Diff. →" header between the two columns it compares.
 const ARROW_DIFF = '← Diff. →';
@@ -418,6 +442,7 @@ function DateCellStyled({ iso, currentYear, style }) {
 // Deposit | Date | Expected | ← Diff. → | Counted | Removed | ← Diff. → | Receipted | Note
 // Deposit / Date are sized to their (fixed-length) values; the amount columns
 // sit close together; Note (left-aligned) takes the rest.
+// A value wider than its column is cut with "…" + tooltip (Fit), widths stay.
 const P_COLS = [116, 148, 84, 64, 84, 72, 64, 80]; // Note: no width → the remaining space
 const NOTE_PAD = { paddingRight: 16 };
 
@@ -443,7 +468,8 @@ export function DepositTable({ deposits, onSaveNote, emptyText }) {
               <th style={TH}><Head pill tip="Total of Removed Cash">Removed</Head></th>
               <th style={TH}><Head tip="Total of Difference between Removed Cash and Receipted">{ARROW_DIFF}</Head></th>
               <th style={TH}><Head pill tip="Total of Receipted removed entered in Collect">Receipted</Head></th>
-              <th style={{ ...TH, textAlign: 'left', ...NOTE_PAD }}>Note</th>
+              {/* header centred over the column; the note text itself is left-aligned */}
+              <th style={TH}>Note</th>
             </tr>
           </thead>
           <tbody>
@@ -453,7 +479,10 @@ export function DepositTable({ deposits, onSaveNote, emptyText }) {
             {deposits.map(d => (
               <tr key={d.id}>
                 <td style={{ ...TD, fontWeight: 600, whiteSpace: 'nowrap' }}>
-                  <Tooltip content={`${d.days} day${d.days === 1 ? '' : 's'}`} preferredPosition="above"><span style={{ cursor: 'default' }}>{d.title}</span></Tooltip>
+                  <Tooltip
+                    content={`${d.days} day${d.days === 1 ? '' : 's'}${d.dates && d.dates.length ? `, ${d.dates.map(x => dateParts(x).main).join(' - ')}` : ''}`}
+                    preferredPosition="above"
+                  ><span style={{ cursor: 'default' }}>{d.title}</span></Tooltip>
                 </td>
                 <td style={{ ...TD, ...NUM }}>{depositStamp(d.createdAt)}</td>
                 <td style={{ ...TD, ...NUM }}><Amt cents={d.expected} pill /></td>

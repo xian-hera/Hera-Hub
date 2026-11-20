@@ -22,18 +22,28 @@ const PAGE_SIZE = 50;
 
 // "Back to top" (2026-11-20, Hera): fixed at the top right of the screen,
 // outside the page width; shows once the page has been scrolled down.
+// In Hub the page scrolls inside <body> (public/index.html sets body
+// overflow-y: scroll on top of Polaris' height: 100%), not the window — so
+// window.scrollY stays 0. Listen to scrolls anywhere (capture) and read /
+// reset body, <html> and window alike.
+const scrolledBy = () => Math.max(window.scrollY || 0, document.documentElement.scrollTop || 0, document.body.scrollTop || 0);
+function scrollAllToTop() {
+  [window, document.documentElement, document.body].forEach((el) => {
+    try { el.scrollTo({ top: 0, behavior: 'smooth' }); } catch (e) { /* ignore */ }
+  });
+}
 function BackToTop() {
   const [show, setShow] = useState(false);
   useEffect(() => {
-    const onScroll = () => setShow(window.scrollY > 300);
+    const onScroll = () => setShow(scrolledBy() > 300);
     onScroll();
-    window.addEventListener('scroll', onScroll, { passive: true });
-    return () => window.removeEventListener('scroll', onScroll);
+    document.addEventListener('scroll', onScroll, { passive: true, capture: true });
+    return () => document.removeEventListener('scroll', onScroll, { capture: true });
   }, []);
   if (!show) return null;
   return (
-    <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 400 }}>
-      <Button onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}>↑ Back to top</Button>
+    <div style={{ position: 'fixed', top: 16, right: 24, zIndex: 400 }}>
+      <Button onClick={scrollAllToTop}>↑ Back to top</Button>
     </div>
   );
 }
