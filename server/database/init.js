@@ -2006,6 +2006,47 @@ const initDatabase = async () => {
     // Operation › Cash Payments tables (2026-11-19, Hera) — see database/cashPaymentsSchema.js.
     await require('./cashPaymentsSchema').ensureCashPaymentsTables(client);
 
+    // ── Wig Try-on › Sale report (2026-11-23, Hera): orders (all channels) of customers
+    // who tried a wig, synced from Shopify by jobs/wigTryonSalesScheduler.js. Only the
+    // try-on customers' orders are stored; used to see if a try-on led to a purchase.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS wig_tryon_customers (
+        customer_id   TEXT PRIMARY KEY,
+        display_name  TEXT,
+        synced_from   TIMESTAMPTZ,
+        synced_until  TIMESTAMPTZ,
+        synced_at     TIMESTAMPTZ
+      )
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS wig_tryon_orders (
+        order_id      TEXT PRIMARY KEY,
+        order_name    TEXT,
+        customer_id   TEXT NOT NULL,
+        created_at    TIMESTAMPTZ NOT NULL,
+        cancelled_at  TIMESTAMPTZ,
+        is_pos        BOOLEAN NOT NULL DEFAULT FALSE,
+        source_name   TEXT,
+        location_name TEXT
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS wig_tryon_orders_cust_idx ON wig_tryon_orders (customer_id, created_at)`);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS wig_tryon_order_lines (
+        order_id      TEXT NOT NULL REFERENCES wig_tryon_orders(order_id) ON DELETE CASCADE,
+        line_id       TEXT NOT NULL,
+        product_id    TEXT,
+        product_title TEXT,
+        product_type  TEXT,
+        variant_title TEXT,
+        options       JSONB,
+        quantity      INTEGER,
+        current_qty   INTEGER,
+        amount        NUMERIC,
+        PRIMARY KEY (order_id, line_id)
+      )
+    `);
+
     await client.query('COMMIT');
     console.log('✓ Database initialized successfully');
   } catch (e) {

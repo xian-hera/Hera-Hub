@@ -13,6 +13,7 @@ const { startNewArrivalScheduler } = require('./jobs/newArrivalScheduler');
 const { startOnlineTaskHistoryScheduler } = require('./jobs/onlineTaskHistory'); // Online Dashboard, 2026-10-01
 const { startPriceChangeScheduler } = require('./jobs/priceChangeScheduler'); // Price Change schedule / reverse, 2026-10-08
 const { startCashPaymentsScheduler } = require('./jobs/cashPaymentsScheduler'); // Operation › Cash Payments, 2026-11-19
+const { startWigTryonSalesScheduler } = require('./jobs/wigTryonSalesScheduler'); // Online › Wig Try-on › Sale report, 2026-11-23
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -135,6 +136,7 @@ const startServer = async () => {
     startOnlineTaskHistoryScheduler();
     startPriceChangeScheduler();
     startCashPaymentsScheduler();
+    startWigTryonSalesScheduler();
     app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
       console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);

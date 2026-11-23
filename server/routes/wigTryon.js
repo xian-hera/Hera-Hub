@@ -203,6 +203,37 @@ adminRouter.get('/stats', async (req, res) => {
   } catch (e) { res.status(500).json({ error: errMsg(e) }); }
 });
 
+// ─── Sale report (2026-11-23) — services/wigTryonSales.js ────────────────────
+const sales = require('../services/wigTryonSales');
+const PERIODS = ['7', '30', '90', 'all'];
+const period = (q) => (PERIODS.includes(String(q.period)) ? String(q.period) : '30');
+
+adminRouter.get('/sales/summary', async (req, res) => {
+  try { res.json(await sales.summary(period(req.query))); } catch (e) { res.status(500).json({ error: errMsg(e) }); }
+});
+adminRouter.get('/sales/products', async (req, res) => {
+  try {
+    res.json(await sales.byProduct(period(req.query), req.query.channel === 'pos' ? 'pos' : 'nonpos', req.query.page));
+  } catch (e) { res.status(500).json({ error: errMsg(e) }); }
+});
+adminRouter.get('/sales/customers', async (req, res) => {
+  try {
+    res.json(await sales.byCustomer(period(req.query), {
+      outcome: ['bought', 'same', 'other', 'none', 'pending'].includes(req.query.outcome) ? req.query.outcome : null,
+      q: req.query.q ? String(req.query.q).slice(0, 100) : null,
+      page: req.query.page,
+    }));
+  } catch (e) { res.status(500).json({ error: errMsg(e) }); }
+});
+// Starts a sync in the background; the page polls /sales/sync-status.
+adminRouter.post('/sales/sync', async (req, res) => {
+  sales.syncCustomers('manual');
+  res.json(await sales.syncStatus());
+});
+adminRouter.get('/sales/sync-status', async (req, res) => {
+  try { res.json(await sales.syncStatus()); } catch (e) { res.status(500).json({ error: errMsg(e) }); }
+});
+
 adminRouter.get('/events', async (req, res) => {
   try {
     const q = req.query;

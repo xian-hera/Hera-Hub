@@ -9,11 +9,13 @@ import WigTryonPrompt from './WigTryonPrompt';
 import WigTryonLog from './WigTryonLog';
 import WigTryonSettings from './WigTryonSettings';
 import WigTryonStorefront from './WigTryonStorefront';
+import WigTryonSales from './WigTryonSales';
 
 const TABS = [
   { id: 'overview', content: 'Overview' },
   { id: 'prompt', content: 'Prompt & Test' },
   { id: 'log', content: 'Usage log' },
+  { id: 'sales', content: 'Sale report' }, // 2026-11-23: did a try-on lead to a purchase?
   { id: 'storefront', content: 'Storefront' },
   { id: 'settings', content: 'Settings' },
 ];
@@ -62,6 +64,7 @@ function OnlineWigTryon({ inTabs = false } = {}) {
           {TABS[tab].id === 'overview' && <WigTryonOverview {...shared} />}
           {TABS[tab].id === 'prompt' && <WigTryonPrompt {...shared} />}
           {TABS[tab].id === 'log' && <WigTryonLog {...shared} />}
+          {TABS[tab].id === 'sales' && <WigTryonSales {...shared} />}
           {TABS[tab].id === 'storefront' && <WigTryonStorefront {...shared} lastSync={data.lastSync} />}
           {TABS[tab].id === 'settings' && <WigTryonSettings {...shared} />}
         </div>

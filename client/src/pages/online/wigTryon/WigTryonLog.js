@@ -1,7 +1,7 @@
 // Online › Wig Try-on › Usage log: every event (funnel steps, generations, blocks).
 import React, { useState, useEffect, useCallback } from 'react';
 import { Card, BlockStack, InlineStack, Text, Select, TextField, Button, Badge, Box } from '@shopify/polaris';
-import { api, RANGES, rangeDates, EVENT_LABEL, REASON_LABEL, ADMIN_PRODUCT, ADMIN_CUSTOMER, fmtTime, fmtMs, fmtNum, TH, TD } from './wigTryonApi';
+import { api, RANGES, rangeDates, EVENT_LABEL, REASON_LABEL, ADMIN_PRODUCT, ADMIN_CUSTOMER, fmtMs, fmtNum, TH, TD } from './wigTryonApi';
 
 const TYPES = [
   { label: 'Generations (success + failed)', value: 'generations' },
@@ -10,6 +10,17 @@ const TYPES = [
   { label: 'Selfie checks (OK + rejected)', value: 'selfie' },
   ...Object.entries(EVENT_LABEL).map(([value, label]) => ({ label, value })),
 ];
+// Short badge text (full name on hover).
+const EVENT_SHORT = {
+  generation_success: 'Gen', generation_failed: 'Gen failed', selfie_submitted: 'Selfie', selfie_accepted: 'Selfie OK',
+  selfie_rejected: 'Selfie ✗', button_click: 'Click', login_completed: 'Login', color_selected: 'Colour',
+  consent_accepted: 'Consent', image_downloaded: 'Saved', tip_shown: 'Tip',
+  blocked_account_limit: 'Limit', blocked_ip_limit: 'IP limit', blocked_global_limit: 'Day limit',
+};
+// "gpt-image-2.5-flare" -> "2.5", "gpt-6-luna" -> "6"
+const modelVersion = (m) => { const x = String(m || '').match(/(\d+(?:\.\d+)?)/); return x ? x[1] : (m || ''); };
+const NW = { ...TD, whiteSpace: 'nowrap', wordBreak: 'normal' };
+
 const TONE = { generation_success: 'success', generation_failed: 'critical', selfie_accepted: 'success', selfie_rejected: 'attention', blocked_account_limit: 'warning', blocked_ip_limit: 'warning', blocked_global_limit: 'warning' };
 
 export default function WigTryonLog({ setBanner }) {
@@ -58,37 +69,55 @@ export default function WigTryonLog({ setBanner }) {
           <>
             <Text tone="subdued" variant="bodySm">{fmtNum(data.total)} events</Text>
             <Box overflowX="auto">
+              {/* Layout 2026-11-23 (Hera): nothing wraps — date / time on two lines, short
+                  event labels, customer + colour + product in one column (product cut with
+                  "…", full name on hover), model shown as its version number only. */}
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
                   <tr>
-                    <th style={TH}>Time</th><th style={TH}>Event</th><th style={TH}>Customer</th><th style={TH}>Product</th>
-                    <th style={TH}>Colour</th><th style={TH}>Prompt</th><th style={TH}>Model</th><th style={TH}>Time taken</th>
+                    <th style={TH}>Time</th><th style={TH}>Event</th><th style={TH}>Customer / colour / product</th>
+                    <th style={TH}>Prompt</th><th style={TH}>Model</th><th style={TH}>Time taken</th>
                     <th style={TH}>Tokens in / out</th><th style={TH}>Error / note</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {data.events.map(e => (
-                    <tr key={e.id}>
-                      <td style={{ ...TD, whiteSpace: 'nowrap' }}>{fmtTime(e.created_at)}</td>
-                      <td style={TD}>
-                        <InlineStack gap="100">
-                          <Badge tone={TONE[e.event_type]}>{EVENT_LABEL[e.event_type] || e.event_type}</Badge>
-                          {e.source === 'admin_test' && <Badge>Hub test</Badge>}
-                        </InlineStack>
-                      </td>
-                      <td style={TD}>{e.customer_id ? <a href={`${ADMIN_CUSTOMER}${e.customer_id}`} target="_blank" rel="noreferrer">{e.customer_id}</a> : (e.source === 'admin_test' ? '' : <Text tone="subdued">guest</Text>)}</td>
-                      <td style={TD}>{e.product_id ? <a href={`${ADMIN_PRODUCT}${e.product_id}`} target="_blank" rel="noreferrer">{e.product_title || e.product_id}</a> : ''}</td>
-                      <td style={TD}>{e.color_name || ''}</td>
-                      <td style={TD}>{e.prompt_version ? `v${e.prompt_version}` : (e.event_type.startsWith('generation') ? 'editor' : '')}</td>
-                      <td style={TD}>{e.model || ''}</td>
-                      <td style={TD}>{e.duration_ms != null ? fmtMs(e.duration_ms) : ''}</td>
-                      <td style={TD}>{e.input_tokens != null ? `${fmtNum(e.input_tokens)} / ${fmtNum(e.output_tokens)}` : ''}</td>
-                      <td style={{ ...TD, color: e.event_type === 'generation_failed' ? '#d72c0d' : undefined }}>
-                        {e.event_type.startsWith('selfie_') && e.error_reason ? (REASON_LABEL[e.error_reason] || e.error_reason) : (e.error_reason || '')}
-                        {e.detail && <div style={{ color: '#6d7175', fontSize: 12 }}>{e.detail}</div>}
-                      </td>
-                    </tr>
-                  ))}
+                  {data.events.map(e => {
+                    const d = new Date(e.created_at);
+                    const err = e.event_type.startsWith('selfie_') && e.error_reason ? (REASON_LABEL[e.error_reason] || e.error_reason) : (e.error_reason || '');
+                    return (
+                      <tr key={e.id}>
+                        <td style={NW}>
+                          <div>{d.toLocaleDateString()}</div>
+                          <div style={{ color: '#6d7175', fontSize: 12 }}>{d.toLocaleTimeString()}</div>
+                        </td>
+                        <td style={NW}>
+                          <InlineStack gap="100" wrap={false}>
+                            <span title={EVENT_LABEL[e.event_type] || e.event_type}><Badge tone={TONE[e.event_type]}>{EVENT_SHORT[e.event_type] || EVENT_LABEL[e.event_type] || e.event_type}</Badge></span>
+                            {e.source === 'admin_test' && <Badge>Test</Badge>}
+                          </InlineStack>
+                        </td>
+                        <td style={{ ...NW, maxWidth: 260 }}>
+                          <div>{e.customer_id
+                            ? <a href={`${ADMIN_CUSTOMER}${e.customer_id}`} target="_blank" rel="noreferrer">{e.customer_id}</a>
+                            : (e.source === 'admin_test' ? <Text as="span" tone="subdued">Hub test</Text> : <Text as="span" tone="subdued">guest</Text>)}</div>
+                          {e.color_name && <div style={{ fontSize: 12, fontWeight: 600 }}>{e.color_name}</div>}
+                          {e.product_id && (
+                            <div style={{ overflow: 'hidden', textOverflow: 'ellipsis' }} title={e.product_title || e.product_id}>
+                              <a href={`${ADMIN_PRODUCT}${e.product_id}`} target="_blank" rel="noreferrer">{e.product_title || e.product_id}</a>
+                            </div>
+                          )}
+                        </td>
+                        <td style={NW}>{e.prompt_version ? `v${e.prompt_version}` : (e.event_type.startsWith('generation') ? 'editor' : '')}</td>
+                        <td style={NW} title={e.model || ''}>{modelVersion(e.model)}</td>
+                        <td style={NW}>{e.duration_ms != null ? fmtMs(e.duration_ms) : ''}</td>
+                        <td style={NW}>{e.input_tokens != null ? `${fmtNum(e.input_tokens)} / ${fmtNum(e.output_tokens)}` : ''}</td>
+                        <td style={{ ...NW, maxWidth: 280, color: e.event_type === 'generation_failed' ? '#d72c0d' : undefined }} title={[err, e.detail].filter(Boolean).join(' — ')}>
+                          <div style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{err}</div>
+                          {e.detail && <div style={{ color: '#6d7175', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.detail}</div>}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </Box>
