@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { BlockStack, InlineStack, Text, Button, Banner } from '@shopify/polaris';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { api, deadlineText, packText, Switch, QtyEditor, ConfirmBox, HUB_BOX, SUBDUED, smallBtnStyle } from './supplyShared';
 import { LocPill, useLocationOrder } from './whShared';
@@ -207,12 +208,91 @@ const CheckBtn = ({ bought, onClick }) => (
   </button>
 );
 
+// Print List (2026-11-23, Hera): the server builds the PDF
+// (GET /shopping/print). Print loads it into a hidden frame and opens the
+// browser's print dialog; PDF downloads it.
+async function fetchListPdf() {
+  const r = await fetch('/api/store-supply/shopping/print');
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}));
+    throw new Error(d.error || 'Could not make the PDF.');
+  }
+  return r.blob();
+}
+
+function printPdfBlob(blob) {
+  const url = URL.createObjectURL(blob);
+  const old = document.getElementById('supply-print-frame');
+  if (old) old.remove();
+  const frame = document.createElement('iframe');
+  frame.id = 'supply-print-frame';
+  frame.title = 'Shopping List print';
+  frame.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;';
+  frame.onload = () => {
+    // Give the PDF viewer a moment to render before printing.
+    setTimeout(() => {
+      try {
+        frame.contentWindow.focus();
+        frame.contentWindow.print();
+      } catch (e) {
+        // Browser refused to print from the frame → open the PDF instead.
+        window.open(url, '_blank');
+      }
+    }, 300);
+  };
+  frame.src = url;
+  document.body.appendChild(frame);
+  // Kept until the next print (the dialog may still be reading it).
+}
+
+function downloadPdfBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+function PrintListBox({ open, fileName, onClose, setError }) {
+  const [busy, setBusy] = useState(''); // '' | 'print' | 'pdf'
+  const run = async (kind) => {
+    setBusy(kind);
+    setError('');
+    try {
+      const blob = await fetchListPdf();
+      if (kind === 'print') printPdfBlob(blob); else downloadPdfBlob(blob, fileName);
+      onClose();
+    } catch (e) { setError(e.message); onClose(); }
+    setBusy('');
+  };
+  if (!open) return null;
+  return createPortal(
+    <div onClick={() => { if (!busy) onClose(); }}
+      style={{ position: 'fixed', inset: 0, zIndex: 520, background: 'rgba(0,0,0,0.45)', display: 'flex', justifyContent: 'center', alignItems: 'flex-start', padding: '12vh 12px 0' }}>
+      <div role="dialog" aria-modal="true" aria-label="Print List" onClick={(e) => e.stopPropagation()}
+        style={{ width: 'min(360px, 100%)', background: '#fff', borderRadius: 12, padding: 16, boxSizing: 'border-box', boxShadow: '0 10px 30px rgba(0,0,0,0.25)' }}>
+        <div style={{ fontSize: 14, fontWeight: 650, marginBottom: 8 }}>Print List</div>
+        <div style={{ fontSize: 13, color: '#303030', marginBottom: 16 }}>The Shopping List, then each item by location.</div>
+        <InlineStack align="end" gap="200">
+          <Button onClick={() => run('pdf')} loading={busy === 'pdf'} disabled={!!busy && busy !== 'pdf'}>PDF</Button>
+          <Button variant="primary" onClick={() => run('print')} loading={busy === 'print'} disabled={!!busy && busy !== 'print'}>Print</Button>
+        </InlineStack>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
 export function ShoppingList({ setError }) {
   const navigate = useNavigate();
   const [data, setData] = useState(null);
-  const [confirm, setConfirm] = useState(null); // { kind: 'undo', row } | { kind: 'finish' }
+  const [confirm, setConfirm] = useState(null); // { kind: 'undo', row } | { kind: 'finish', all? }
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
+  const [printOpen, setPrintOpen] = useState(false);
   const load = useCallback(() => api('GET', '/shopping').then(setData).catch(e => setError(e.message)), [setError]);
   useEffect(() => { load(); }, [load]);
   if (!data) return <Text tone="subdued">Loading...</Text>;
@@ -231,7 +311,9 @@ export function ShoppingList({ setError }) {
       await call('POST', `/shopping/${confirm.row.itemId}/bought`, { bought: false });
     } else {
       setError('');
-      try { await api('POST', '/shopping/finish'); setDone(true); } catch (e) { setError(e.message); }
+      // all: the Finish Shopping button marks every item still unchecked as
+      // bought first (2026-11-23); the confirm after the last check doesn't need it.
+      try { await api('POST', '/shopping/finish', confirm.all ? { all: true } : undefined); setDone(true); } catch (e) { setError(e.message); }
       await load();
     }
     setBusy(false);
@@ -268,10 +350,19 @@ export function ShoppingList({ setError }) {
       <BatchRange from={data.from} to={data.to} />
       <div style={{ ...CARD, padding: '12px 16px' }}>
         <BlockStack gap="300">
-          <InlineStack gap="300" blockAlign="center" wrap>
-            <Switch on={data.useStock} label={data.useStock ? 'Use Stock' : 'Ignore Stock'}
-              onChange={(v) => call('PUT', '/shopping/use-stock', { useStock: v })} />
-            <span style={{ fontSize: 13, color: SUBDUED }}>{data.useStock ? 'Buy only what is missing.' : 'Buy everything the stores asked for.'}</span>
+          <InlineStack align="space-between" blockAlign="center" gap="300" wrap>
+            <InlineStack gap="300" blockAlign="center" wrap>
+              <Switch on={data.useStock} label={data.useStock ? 'Use Stock' : 'Ignore Stock'}
+                onChange={(v) => call('PUT', '/shopping/use-stock', { useStock: v })} />
+              <span style={{ fontSize: 13, color: SUBDUED }}>{data.useStock ? 'Buy only what is missing.' : 'Buy everything the stores asked for.'}</span>
+            </InlineStack>
+            {/* Top-right (2026-11-23, Hera): Print List, and Finish Shopping —
+                moved here from under the list; it now checks every item as
+                bought and finishes (Store Supply tasks go to the Schedule). */}
+            <InlineStack gap="200" blockAlign="center">
+              <Button onClick={() => setPrintOpen(true)} disabled={data.rows.length === 0}>Print List</Button>
+              <Button variant="primary" onClick={() => setConfirm({ kind: 'finish', all: true })}>Finish Shopping</Button>
+            </InlineStack>
           </InlineStack>
           {data.rows.length === 0 ? (
             <Text tone="subdued">Nothing to buy — every approved qty is 0.</Text>
@@ -313,11 +404,8 @@ export function ShoppingList({ setError }) {
               </table>
             </>
           )}
-          {data.allBought && (
-            <InlineStack align="end">
-              <Button variant="primary" onClick={() => setConfirm({ kind: 'finish' })}>Finish Shopping</Button>
-            </InlineStack>
-          )}
+          {/* The Finish Shopping button that showed here once every item was
+              checked moved to the top-right (2026-11-23). */}
         </BlockStack>
       </div>
       <ConfirmBox
@@ -330,8 +418,12 @@ export function ShoppingList({ setError }) {
       >
         {confirm && confirm.kind === 'undo'
           ? `${confirm.row.name} goes back on the list as not bought.`
-          : 'The bought quantities are added to Inventory and the batch is closed. Its approved requests become Store Supply tasks in the Schedule.'}
+          : (confirm && confirm.all && !data.allBought
+            ? 'Every item on the list is checked as bought with its Qty to Buy. The quantities are added to Inventory and the batch is closed. Its approved requests become Store Supply tasks in the Schedule.'
+            : 'The bought quantities are added to Inventory and the batch is closed. Its approved requests become Store Supply tasks in the Schedule.')}
       </ConfirmBox>
+      <PrintListBox open={printOpen} onClose={() => setPrintOpen(false)} setError={setError}
+        fileName={`Shopping-List_${data.to || 'list'}.pdf`} />
     </BlockStack>
   );
 }

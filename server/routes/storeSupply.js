@@ -22,7 +22,8 @@
 //   PATCH  /requests/:id/lines/:lineId { qty } · POST /requests/:id/approve · POST /requests/:id/unapprove
 //   GET    /shopping                         → { ready, reason, from, to, useStock, rows, allBought }
 //   PUT    /shopping/use-stock { useStock } · PATCH /shopping/:itemId { qty }
-//   POST   /shopping/:itemId/bought { bought } · POST /shopping/finish
+//   POST   /shopping/:itemId/bought { bought } · POST /shopping/finish { all? }
+//   GET    /shopping/print                   → PDF (Print List, 2026-11-23)
 const express = require('express');
 const router = express.Router();
 const { pool } = require('../database/init');
@@ -431,30 +432,32 @@ async function shoppingView(db) {
     `SELECT i.id, i.name, i.pack_size, i.inventory_qty FROM supply_items i JOIN supply_groups g ON g.id = i.group_id
       WHERE i.id = ANY($1) ORDER BY g.sort_order, g.id, i.sort_order, i.id`, [ids]
   )).rows : [];
-  const rows = items.map(i => {
+  const rows = items.map((i, pos) => {
     const requested = totals.get(i.id) || 0;
     const st = state.get(i.id);
     const bought = !!(st && st.bought);
     const def = useStock ? Math.max(0, requested - i.inventory_qty) : requested;
     const qtyToBuy = bought ? (st.bought_qty || 0)
       : (st && st.buy_qty != null && st.base_requested === requested ? st.buy_qty : def);
-    return { itemId: i.id, name: i.name, packSize: i.pack_size || '', inventory: i.inventory_qty, requested, qtyToBuy, bought, changed: !bought && !!(st && st.buy_qty != null && st.base_requested === requested) };
+    // pos = Supply Management order (the list itself puts items still to buy
+    // first; the printed list keeps this order — 2026-11-23).
+    return { itemId: i.id, pos, name: i.name, packSize: i.pack_size || '', inventory: i.inventory_qty, requested, qtyToBuy, bought, changed: !bought && !!(st && st.buy_qty != null && st.base_requested === requested) };
   });
   // Nothing to buy (Qty to Buy 0, e.g. covered by stock) needs no check.
   const todo = (r) => !r.bought && r.qtyToBuy > 0;
   rows.sort((a, c) => Number(todo(c)) - Number(todo(a))); // stable: still to buy first
-  return { ...base, ready: true, rows, allBought: !rows.some(todo), deadlines: b.deadlines };
+  return { ...base, ready: true, rows, allBought: !rows.some(todo), deadlines: b.deadlines, requests: reqs };
 }
 
 router.get('/shopping', async (req, res) => {
-  try { const v = await shoppingView(pool); delete v.deadlines; res.json(v); } catch (e) { fail(res, e, 'GET /api/store-supply/shopping'); }
+  try { const v = await shoppingView(pool); delete v.deadlines; delete v.requests; res.json(v); } catch (e) { fail(res, e, 'GET /api/store-supply/shopping'); }
 });
 
 router.put('/shopping/use-stock', async (req, res) => {
   try {
     const s = await SS.getSettings();
     await SS.saveSettings(pool, { ...s, useStock: !!(req.body && req.body.useStock) });
-    const v = await shoppingView(pool); delete v.deadlines; res.json(v);
+    const v = await shoppingView(pool); delete v.deadlines; delete v.requests; res.json(v);
   } catch (e) { fail(res, e, 'PUT /api/store-supply/shopping/use-stock'); }
 });
 
@@ -478,7 +481,7 @@ router.patch('/shopping/:itemId', async (req, res) => {
        ON CONFLICT (item_id) DO UPDATE SET buy_qty = EXCLUDED.buy_qty, base_requested = EXCLUDED.base_requested, updated_at = NOW()`,
       [row.itemId, n, row.requested]
     );
-    const v = await shoppingView(pool); delete v.deadlines; res.json(v);
+    const v = await shoppingView(pool); delete v.deadlines; delete v.requests; res.json(v);
   } catch (e) { fail(res, e, 'PATCH /api/store-supply/shopping/:itemId'); }
 });
 
@@ -492,12 +495,16 @@ router.post('/shopping/:itemId/bought', async (req, res) => {
        ON CONFLICT (item_id) DO UPDATE SET bought = EXCLUDED.bought, bought_qty = EXCLUDED.bought_qty, updated_at = NOW()`,
       [row.itemId, bought, bought ? row.qtyToBuy : null]
     );
-    const v = await shoppingView(pool); delete v.deadlines; res.json(v);
+    const v = await shoppingView(pool); delete v.deadlines; delete v.requests; res.json(v);
   } catch (e) { fail(res, e, 'POST /api/store-supply/shopping/:itemId/bought'); }
 });
 
 // Everything bought → inventory += bought qty, the batch is finished (its
 // approved requests become Store Supply tasks — step 3), the list is cleared.
+// { all: true } (Finish Shopping button, top-right of the list, 2026-11-23,
+// Hera): every item not checked yet is first marked bought with its current
+// Qty to Buy, then the same finish runs. Without it (the confirm after the
+// last check) every item must already be checked.
 router.post('/shopping/finish', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -505,9 +512,10 @@ router.post('/shopping/finish', async (req, res) => {
     await client.query("SELECT pg_advisory_xact_lock(hashtext('store_supply_cycle'))");
     const v = await shoppingView(client);
     if (!v.ready) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'The Shopping List is not ready.' }); }
-    if (!v.allBought) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Check every item as bought first.' }); }
+    const all = !!(req.body && req.body.all);
+    if (!all && !v.allBought) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Check every item as bought first.' }); }
     for (const r of v.rows) {
-      if (r.bought && r.qtyToBuy > 0) await client.query('UPDATE supply_items SET inventory_qty = inventory_qty + $2, updated_at = NOW() WHERE id = $1', [r.itemId, r.qtyToBuy]);
+      if ((r.bought || all) && r.qtyToBuy > 0) await client.query('UPDATE supply_items SET inventory_qty = inventory_qty + $2, updated_at = NOW() WHERE id = $1', [r.itemId, r.qtyToBuy]);
     }
     await SS.refreshItemStatus(client, v.rows.map(r => r.itemId));
     await client.query('UPDATE supply_deadlines SET finished_at = NOW() WHERE deadline = ANY($1::date[])', [v.deadlines]);
@@ -520,6 +528,202 @@ router.post('/shopping/finish', async (req, res) => {
     await client.query('ROLLBACK').catch(() => {});
     fail(res, e, 'POST /api/store-supply/shopping/finish');
   } finally { client.release(); }
+});
+
+// ── Print List (2026-11-23, Hera) ───────────────────────────────────────────
+// GET /shopping/print → one PDF, Letter, read by people with weak eyesight
+// (large type, roomy rows):
+//   Part 1 — "Shopping List": Item | Qty, three Item / Qty groups side by
+//     side, filled column by column. Qty = Qty to Buy (same as the list; 0
+//     included). Supply Management order.
+//   Part 2 — Item × Location table, drawn turned 90° clockwise on a portrait
+//     page so nobody has to pick the paper direction when printing. A cell
+//     is empty when that location didn't ask for the item. Locations that
+//     asked for nothing are left out. All locations fit on one page width
+//     (columns and type get narrower when there are many); items continue
+//     on the next page.
+const PDF_PAGE = { w: 612, h: 792 }; // Letter, points
+const PDF_LINE = '#8a8a8a';
+
+function pdfShoppingPart(doc, rows) {
+  const M = 36;
+  const GAP = 18;
+  const groupW = (PDF_PAGE.w - 2 * M - 2 * GAP) / 3;
+  const qtyW = 50;
+  const nameW = groupW - qtyW;
+  const PAD = 9;
+  const FONT = 14;
+  const MIN_H = 30;
+  const rowH = (name) => {
+    doc.font('Helvetica-Bold').fontSize(FONT);
+    return Math.max(MIN_H, Math.ceil(doc.heightOfString(name || ' ', { width: nameW - 2 * PAD, lineGap: 2 })) + 2 * PAD);
+  };
+
+  let page = 0;
+  let group = 0;
+  let top = 0;
+  let headTop = 0;
+  let y = 0;
+  const startPage = () => {
+    if (page > 0) doc.addPage();
+    page += 1;
+    let t = M;
+    if (page === 1) {
+      doc.font('Helvetica-Bold').fontSize(28).fillColor('#000')
+        .text('Shopping List', M, t, { width: PDF_PAGE.w - 2 * M, align: 'center', lineBreak: false });
+      t += 46;
+    }
+    headTop = t;
+    top = t + 24;
+    group = 0;
+    y = top;
+    drawHead();
+  };
+  // Item / Qty header above a group (only groups that get rows)
+  const drawHead = () => {
+    const x = M + group * (groupW + GAP);
+    doc.font('Helvetica').fontSize(14).fillColor('#6d7175');
+    doc.text('Item', x + PAD, headTop, { width: nameW - 2 * PAD, lineBreak: false });
+    doc.text('Qty', x + nameW, headTop, { width: qtyW, align: 'center', lineBreak: false });
+  };
+  const drawRow = (r, h) => {
+    const x = M + group * (groupW + GAP);
+    doc.lineWidth(0.8).strokeColor(PDF_LINE);
+    doc.rect(x, y, groupW, h).stroke();
+    doc.moveTo(x + nameW, y).lineTo(x + nameW, y + h).stroke();
+    doc.font('Helvetica-Bold').fontSize(FONT).fillColor('#000');
+    const nameH = doc.heightOfString(r.name || ' ', { width: nameW - 2 * PAD, lineGap: 2 });
+    doc.text(r.name || '', x + PAD, y + (h - nameH) / 2, { width: nameW - 2 * PAD, lineGap: 2 });
+    doc.text(String(r.qtyToBuy), x + nameW, y + (h - FONT) / 2 + 1, { width: qtyW, align: 'center', lineBreak: false });
+  };
+
+  startPage();
+  for (const r of rows) {
+    const h = rowH(r.name);
+    if (y + h > PDF_PAGE.h - M) {
+      group += 1;
+      y = top;
+      if (group > 2) startPage(); else drawHead();
+    }
+    drawRow(r, h);
+    y += h;
+  }
+}
+
+function pdfLocationPart(doc, rows, locs, qtyOf) {
+  // Drawn in a landscape frame (W × H), then turned 90° clockwise onto the
+  // portrait page: landscape (X, Y) → portrait (612 − Y, X).
+  const W = PDF_PAGE.h;
+  const H = PDF_PAGE.w;
+  const M = 30;
+  const PAD = 8;
+  const n = locs.length;
+  const avail = W - 2 * M;
+  const nameW = n > 12 ? 160 : 200;
+  const locW = Math.min(64, (avail - nameW) / n);
+  const tableW = nameW + locW * n;
+  // Bold 14 pt when it fits; narrower columns get smaller type (min 7).
+  doc.font('Helvetica-Bold');
+  let locFont = 14;
+  const widest = (size) => { doc.fontSize(size); return Math.max(...locs.map(l => doc.widthOfString(l)), doc.widthOfString('999')); };
+  while (locFont > 7 && widest(locFont) > locW - 4) locFont -= 0.5;
+  const NAME_FONT = 14;
+  const HEAD_H = 34;
+  const MIN_H = 30;
+
+  const rowH = (name) => {
+    doc.font('Helvetica-Bold').fontSize(NAME_FONT);
+    return Math.max(MIN_H, Math.ceil(doc.heightOfString(name || ' ', { width: nameW - 2 * PAD, lineGap: 2 })) + 2 * PAD);
+  };
+  const cellText = (txt, x, y, w, h, size) => {
+    doc.font('Helvetica-Bold').fontSize(size).fillColor('#000');
+    doc.text(txt, x, y + (h - size) / 2 + 1, { width: w, align: 'center', lineBreak: false });
+  };
+
+  let y = 0;
+  const startPage = () => {
+    doc.addPage();
+    doc.save();
+    doc.transform(0, 1, -1, 0, PDF_PAGE.w, 0);
+    y = M;
+    doc.lineWidth(0.8).strokeColor(PDF_LINE);
+    doc.rect(M + nameW, y, locW * n, HEAD_H).stroke();
+    locs.forEach((l, i) => {
+      const x = M + nameW + i * locW;
+      if (i > 0) doc.moveTo(x, y).lineTo(x, y + HEAD_H).stroke();
+      cellText(l, x, y, locW, HEAD_H, locFont);
+    });
+    y += HEAD_H;
+  };
+  const endPage = () => doc.restore();
+
+  startPage();
+  for (const r of rows) {
+    const h = rowH(r.name);
+    if (y + h > H - M) { endPage(); startPage(); }
+    doc.lineWidth(0.8).strokeColor(PDF_LINE);
+    doc.rect(M, y, tableW, h).stroke();
+    for (let i = 0; i <= n - 1; i += 1) {
+      const x = M + nameW + i * locW;
+      doc.moveTo(x, y).lineTo(x, y + h).stroke();
+    }
+    doc.font('Helvetica-Bold').fontSize(NAME_FONT).fillColor('#000');
+    const nameH = doc.heightOfString(r.name || ' ', { width: nameW - 2 * PAD, lineGap: 2 });
+    doc.text(r.name || '', M + PAD, y + (h - nameH) / 2, { width: nameW - 2 * PAD, lineGap: 2 });
+    locs.forEach((l, i) => {
+      const q = qtyOf(r.itemId, l);
+      if (q > 0) cellText(String(q), M + nameW + i * locW, y, locW, h, Math.min(NAME_FONT, Math.max(locFont, 10)));
+    });
+    y += h;
+  }
+  endPage();
+}
+
+router.get('/shopping/print', async (req, res) => {
+  try {
+    const v = await shoppingView(pool);
+    if (!v.ready) return res.status(409).json({ error: 'The Shopping List is not ready.' });
+    const rows = [...v.rows].sort((a, b) => a.pos - b.pos);
+
+    // qty per item per location (effective qty; a location may appear in
+    // more than one merged deadline → summed)
+    const byItemLoc = new Map();
+    for (const r of v.requests || []) {
+      for (const l of r.lines) {
+        const q = l.approvedQty != null ? l.approvedQty : l.qty;
+        if (l.itemId == null || !(q > 0)) continue;
+        const k = `${l.itemId}|${r.location}`;
+        byItemLoc.set(k, (byItemLoc.get(k) || 0) + q);
+      }
+    }
+    const onList = new Set(rows.map(r => r.itemId));
+    const usedLocs = new Set();
+    for (const k of byItemLoc.keys()) {
+      const [itemId, loc] = k.split('|');
+      if (onList.has(Number(itemId))) usedLocs.add(loc);
+    }
+    // canonical location order (Purchasing › Settings › Locations › Order)
+    let order = [];
+    try { order = (await require('./shopify').getActiveLocationMap()).map(l => l.name); } catch (e) { console.error('print: location order failed:', e.message); }
+    const idx = new Map(order.map((n, i) => [n, i]));
+    const locs = [...usedLocs].sort((a, b) => {
+      const ia = idx.has(a) ? idx.get(a) : Number.MAX_SAFE_INTEGER;
+      const ib = idx.has(b) ? idx.get(b) : Number.MAX_SAFE_INTEGER;
+      return ia !== ib ? ia - ib : a.localeCompare(b);
+    });
+
+    const PDFDocument = require('pdfkit');
+    const doc = new PDFDocument({ size: 'LETTER', margin: 0, autoFirstPage: true, info: { Title: 'Shopping List' } });
+    res.set('Content-Type', 'application/pdf');
+    res.set('Content-Disposition', `inline; filename="Shopping-List_${v.to || 'list'}.pdf"`);
+    doc.pipe(res);
+    pdfShoppingPart(doc, rows);
+    if (locs.length && rows.length) pdfLocationPart(doc, rows, locs, (itemId, loc) => byItemLoc.get(`${itemId}|${loc}`) || 0);
+    doc.end();
+  } catch (e) {
+    if (res.headersSent) { console.error('GET /api/store-supply/shopping/print error:', e); res.end(); return; }
+    fail(res, e, 'GET /api/store-supply/shopping/print');
+  }
 });
 
 // ── Store (MA) ──────────────────────────────────────────────────────────────
