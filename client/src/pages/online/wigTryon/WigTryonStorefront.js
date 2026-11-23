@@ -3,7 +3,7 @@
 // Saved to the Hub and written to the app metafield hera_tryon.config, which
 // the "Hera Wig Try-on" app embed reads.
 import React, { useState } from 'react';
-import { Card, BlockStack, InlineStack, InlineGrid, Text, TextField, Button, Modal, Banner } from '@shopify/polaris';
+import { Card, BlockStack, InlineStack, InlineGrid, Text, TextField, Button, Modal, Banner, Checkbox, Select } from '@shopify/polaris';
 import { api, fmtTime } from './wigTryonApi';
 
 // Same picture as the built-in icon in shopify-app/extensions/hera-swatch/assets/hera-tryon.js.
@@ -62,7 +62,7 @@ function IconPicker({ open, onClose, onPick }) {
     try { setFiles((await api.get(`/files?q=${encodeURIComponent(q)}`)).files); } catch (e) { setError(e.message); }
   };
   return (
-    <Modal open={open} onClose={onClose} title="Choose the icon from Shopify Files" secondaryActions={[{ content: 'Cancel', onAction: onClose }]}>
+    <Modal open={open} onClose={onClose} title="Choose an image from Shopify Files" secondaryActions={[{ content: 'Cancel', onAction: onClose }]}>
       <Modal.Section>
         <BlockStack gap="300">
           <Text tone="subdued" variant="bodySm">Upload the icon in Shopify admin › Content › Files first (square PNG or SVG works best), then search for it here.</Text>
@@ -89,12 +89,22 @@ function IconPicker({ open, onClose, onPick }) {
 export default function WigTryonStorefront({ config, reload, setBanner, lastSync }) {
   const [sf, setSf] = useState(() => ({ ...config.storefront }));
   const [ui, setUi] = useState(() => JSON.parse(JSON.stringify(config.ui)));
+  // which image the Shopify Files picker is choosing: 'icon' | 'floatEn' | 'floatFr' | false
   const [picking, setPicking] = useState(false);
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
 
   const setText = (key, lang, v) => setUi(prev => ({ ...prev, [key]: { ...prev[key], [lang]: v } }));
   const iconSrc = sf.iconFile ? sf.iconFile.url : DEFAULT_ICON;
+  const fl = sf.floating || { enabled: false, fileEn: null, fileFr: null, corner: 'right', top: 80, side: 12, height: 40 };
+  const setFl = (patch) => setSf(prev => ({ ...prev, floating: { ...fl, ...(prev.floating || {}), ...patch } }));
+  const onPick = (f) => {
+    const file = { filename: f.filename, url: f.url };
+    if (picking === 'floatEn') setFl({ fileEn: file });
+    else if (picking === 'floatFr') setFl({ fileFr: file });
+    else setSf(prev => ({ ...prev, iconFile: file }));
+    setPicking(false);
+  };
 
   const save = async () => {
     setSaving(true);
@@ -137,7 +147,7 @@ export default function WigTryonStorefront({ config, reload, setBanner, lastSync
             <BlockStack gap="300">
               <Text>{sf.iconFile ? `Shopify file: ${sf.iconFile.filename}` : 'Built-in icon'}</Text>
               <InlineStack gap="200">
-                <Button onClick={() => setPicking(true)}>{sf.iconFile ? 'Replace icon' : 'Choose from Shopify Files'}</Button>
+                <Button onClick={() => setPicking('icon')}>{sf.iconFile ? 'Replace icon' : 'Choose from Shopify Files'}</Button>
                 {sf.iconFile && <Button variant="plain" onClick={() => setSf({ ...sf, iconFile: null })}>Use built-in icon</Button>}
               </InlineStack>
               <InlineGrid columns={2} gap="300">
@@ -147,6 +157,48 @@ export default function WigTryonStorefront({ config, reload, setBanner, lastSync
               <Text tone="subdued" variant="bodySm">The same icon is shown in the window while the photo is being made.</Text>
             </BlockStack>
           </InlineStack>
+        </BlockStack>
+      </Card>
+
+      {/* Floating mobile button (2026-11-23, Hera) */}
+      <Card>
+        <BlockStack gap="300">
+          <Text variant="headingMd">Floating mobile button</Text>
+          <Text tone="subdued" variant="bodySm">Phones only. When the customer scrolls down and the icon on the product photo is no longer visible, this button stays in a top corner of the screen; tapping it opens the try-on window. Upload the pictures in Shopify admin › Content › Files first (SVG or PNG), then choose them here.</Text>
+          <Checkbox label="Show the floating button" checked={!!fl.enabled} onChange={v => setFl({ enabled: v })}
+            helpText={fl.enabled && !fl.fileEn ? 'Choose at least the English picture — without it the button is not shown.' : undefined} />
+          <InlineGrid columns={{ xs: 1, md: 2 }} gap="400">
+            {[['floatEn', 'fileEn', 'English picture'], ['floatFr', 'fileFr', 'French picture (empty = English one)']].map(([target, key, label]) => (
+              <BlockStack key={key} gap="200">
+                <Text fontWeight="semibold">{label}</Text>
+                <div style={{ minHeight: 56, display: 'flex', alignItems: 'center', padding: 8, borderRadius: 8, background: '#ececec' }}>
+                  {fl[key] ? <img src={fl[key].url} alt="" style={{ height: Number(fl.height) || 40, width: 'auto', maxWidth: '100%' }} /> : <Text tone="subdued">No picture</Text>}
+                </div>
+                {fl[key] && <Text tone="subdued" variant="bodySm">{fl[key].filename}</Text>}
+                <InlineStack gap="200">
+                  <Button onClick={() => setPicking(target)}>{fl[key] ? 'Replace' : 'Choose from Shopify Files'}</Button>
+                  {fl[key] && <Button variant="plain" onClick={() => setFl({ [key]: null })}>Remove</Button>}
+                </InlineStack>
+              </BlockStack>
+            ))}
+          </InlineGrid>
+          <InlineGrid columns={{ xs: 1, md: 4 }} gap="300">
+            <Select label="Corner" value={fl.corner} onChange={v => setFl({ corner: v })}
+              options={[{ label: 'Top right', value: 'right' }, { label: 'Top left', value: 'left' }]} />
+            <TextField type="number" label="Distance from top (px)" value={String(fl.top)} onChange={v => setFl({ top: v })} autoComplete="off"
+              helpText="Leave room for the store's sticky header." />
+            <TextField type="number" label={`Distance from ${fl.corner === 'left' ? 'left' : 'right'} side (px)`} value={String(fl.side)} onChange={v => setFl({ side: v })} autoComplete="off" />
+            <TextField type="number" label="Height (px)" value={String(fl.height)} onChange={v => setFl({ height: v })} autoComplete="off"
+              helpText="Width follows the picture's proportions." />
+          </InlineGrid>
+          {/* Preview on a phone-sized screen */}
+          <div style={{ position: 'relative', width: 300, height: 180, borderRadius: 16, background: '#f4f4f4', border: '6px solid #222', overflow: 'hidden' }}>
+            <div style={{ height: 34, background: '#fff', borderBottom: '1px solid #e1e1e1', fontSize: 11, color: '#999', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>store header</div>
+            {fl.fileEn && (
+              <img src={fl.fileEn.url} alt="" style={{ position: 'absolute', top: Math.round((Number(fl.top) || 0) * 300 / 390), [fl.corner === 'left' ? 'left' : 'right']: Math.round((Number(fl.side) || 0) * 300 / 390), height: Math.round((Number(fl.height) || 40) * 300 / 390), width: 'auto' }} />
+            )}
+            <span style={{ position: 'absolute', bottom: 6, left: 0, right: 0, textAlign: 'center', fontSize: 11, color: '#999' }}>preview (phone width, scaled)</span>
+          </div>
         </BlockStack>
       </Card>
 
@@ -184,8 +236,7 @@ export default function WigTryonStorefront({ config, reload, setBanner, lastSync
 
       <InlineStack align="end"><Button variant="primary" onClick={save} loading={saving}>Save storefront</Button></InlineStack>
 
-      <IconPicker open={picking} onClose={() => setPicking(false)}
-        onPick={(f) => { setSf({ ...sf, iconFile: { filename: f.filename, url: f.url } }); setPicking(false); }} />
+      <IconPicker open={!!picking} onClose={() => setPicking(false)} onPick={onPick} />
     </BlockStack>
   );
 }

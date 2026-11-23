@@ -94,3 +94,13 @@ html.ht-lock, html.ht-lock body { overflow: hidden !important; }
 .ht-tip-text::before { content: ''; position: absolute; top: -7px; left: calc(var(--ht-arrow-x, 24px) - 7px); width: 14px; height: 14px; background: #fff; transform: rotate(45deg); border-radius: 2px; }
 .ht-tip-text.is-above::before { top: auto; bottom: -7px; }
 .ht-tip-catch { position: fixed; inset: 0; z-index: 2147481002; background: transparent; cursor: pointer; }
+
+/* Floating mobile button (2026-11-23): phones only; shown by JS (.is-on) once the
+   photo's icon has scrolled out of view. Below the try-on window and the tip. */
+.ht-float { display: none; position: fixed; z-index: 2147480000; padding: 0; margin: 0; border: 0; background: none; cursor: pointer; line-height: 0; min-width: 0; min-height: 0; box-shadow: none; -webkit-tap-highlight-color: transparent; opacity: 0; transform: translateY(-6px); transition: opacity .2s ease, transform .2s ease; pointer-events: none; }
+.ht-float img { display: block; width: auto; max-width: none; }
+@media (max-width: 767px) {
+  .ht-float { display: block; }
+  .ht-float.is-on { opacity: 1; transform: none; pointer-events: auto; }
+}
+html.ht-lock .ht-float { display: none; }

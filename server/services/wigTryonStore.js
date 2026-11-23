@@ -98,6 +98,11 @@ const DEFAULT_CONFIG = {
     iconFile: null,               // { filename, url } from Shopify Files; null = built-in icon
     iconSize: 48,                 // px, square
     iconOffset: 12,               // px from the top-left corner of the product photo
+    // Floating mobile button (2026-11-23, Hera): on phones, once the photo's icon has
+    // scrolled out of view, a bar-shaped button stays in a top corner and opens the
+    // same window. One image per language (FR falls back to EN); width follows the
+    // image's own proportions.
+    floating: { enabled: false, fileEn: null, fileFr: null, corner: 'right', top: 80, side: 12, height: 40 },
     privacyUrl: '/policies/privacy-policy',
     proxyPath: '/apps/hera-tryon',
     gallerySelector: 'media-gallery[id$="__main"] .product__media-gallery-viewer-wrap',
@@ -175,7 +180,10 @@ function mergeConfig(saved) {
     pricing: { ...DEFAULT_CONFIG.pricing, ...(s.pricing || {}) },
     limits: { ...DEFAULT_CONFIG.limits, ...(s.limits || {}) },
     selfieCheck: { ...DEFAULT_CONFIG.selfieCheck, ...(s.selfieCheck || {}) },
-    storefront: { ...DEFAULT_CONFIG.storefront, ...(s.storefront || {}) },
+    storefront: {
+      ...DEFAULT_CONFIG.storefront, ...(s.storefront || {}),
+      floating: { ...DEFAULT_CONFIG.storefront.floating, ...((s.storefront || {}).floating || {}) },
+    },
     text,
     selfieText,
     ui,
@@ -220,6 +228,19 @@ async function saveConfig(patch) {
     iconFile: sf.iconFile && sf.iconFile.filename ? { filename: String(sf.iconFile.filename), url: String(sf.iconFile.url || '') } : null,
     iconSize: toInt(sf.iconSize, 24, 120, 48),
     iconOffset: toInt(sf.iconOffset, 0, 60, 12),
+    floating: (() => {
+      const f = { ...DEFAULT_CONFIG.storefront.floating, ...(sf.floating || {}) };
+      const file = (x) => (x && x.filename ? { filename: String(x.filename), url: String(x.url || '') } : null);
+      return {
+        enabled: !!f.enabled,
+        fileEn: file(f.fileEn),
+        fileFr: file(f.fileFr),
+        corner: f.corner === 'left' ? 'left' : 'right',
+        top: toInt(f.top, 0, 400, 80),
+        side: toInt(f.side, 0, 200, 12),
+        height: toInt(f.height, 16, 120, 40),
+      };
+    })(),
     privacyUrl: /^(https:\/\/|\/)[^\s"'<>]*$/.test(String(sf.privacyUrl || '').trim()) ? String(sf.privacyUrl).trim() : DEFAULT_CONFIG.storefront.privacyUrl,
     proxyPath: cleanPath(sf.proxyPath, DEFAULT_CONFIG.storefront.proxyPath),
     // CSS selector: no braces / angle brackets so it can't break out of the <style> tag

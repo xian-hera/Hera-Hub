@@ -174,6 +174,34 @@
     track('tip_shown');
   }
 
+  // ─── Floating mobile button (2026-11-23, Hera) ──────────────────────────────
+  // Phones only (< 768px, CSS). Appears in a top corner once the icon on the photo
+  // has scrolled up out of view; disappears when the photo is back in view. Same
+  // action as the icon. Picture, corner, distances and height come from the Hub.
+  function placeFloating(icon) {
+    var f = D.floating;
+    if (!f || !f.url || document.querySelector('.ht-float') || !('IntersectionObserver' in window)) return;
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'ht-float';
+    b.setAttribute('aria-label', tx('iconLabel'));
+    b.style.top = (+f.top || 0) + 'px';
+    b.style[f.corner === 'left' ? 'left' : 'right'] = (+f.side || 0) + 'px';
+    var img = document.createElement('img');
+    img.src = f.url;
+    img.alt = '';
+    img.style.height = (+f.height || 40) + 'px';
+    b.appendChild(img);
+    b.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); onIconClick(); });
+    document.body.appendChild(b);
+    new IntersectionObserver(function (entries) {
+      var en = entries[entries.length - 1];
+      // shown only when the icon is above the screen (scrolled past), not below it
+      var show = !en.isIntersecting && en.boundingClientRect.top < 0;
+      b.classList.toggle('is-on', show);
+    }, { threshold: 0 }).observe(icon);
+  }
+
   function placeIcon() {
     var host = null;
     var sels = [D.gallerySelector, 'media-gallery[id$="__main"]', '.product__media-wrapper'];
@@ -191,6 +219,7 @@
     b.innerHTML = iconHtml();
     b.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); onIconClick(); });
     host.appendChild(b);
+    placeFloating(b);
     // First-visit tip, once the page has settled a little.
     if (!tipSeen()) {
       tipAllowed().then(function (ok) {

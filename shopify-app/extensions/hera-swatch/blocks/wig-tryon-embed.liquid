@@ -102,6 +102,20 @@
   "iconUrl": {% if ht.iconFile != blank %}{{ ht.iconFile | file_url | json }}{% else %}""{% endif %},
   "iconSize": {{ ht.iconSize | default: 48 }},
   "iconOffset": {{ ht.iconOffset | default: 12 }},
+  {%- liquid
+    # Floating mobile button (2026-11-23): picture for this language, French falls back to English.
+    assign ht_fl_file = ht.floating.en
+    if ht_lang == 'fr' and ht.floating.fr != blank
+      assign ht_fl_file = ht.floating.fr
+    endif
+  -%}
+  "floating": {% if ht.floating.enabled and ht_fl_file != blank %}{
+    "url": {{ ht_fl_file | file_url | json }},
+    "corner": {{ ht.floating.corner | default: 'right' | json }},
+    "top": {{ ht.floating.top | default: 80 }},
+    "side": {{ ht.floating.side | default: 12 }},
+    "height": {{ ht.floating.height | default: 40 }}
+  }{% else %}null{% endif %},
   "swatchStyle": {
     "w": {{ hs_cfg.style.cardWidth | default: 72 }},
     "h": {{ hs_cfg.style.imageHeight | default: 81 }},

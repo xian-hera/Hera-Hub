@@ -21,6 +21,16 @@ function buildPayload(cfg) {
     iconFile: cfg.storefront.iconFile ? cfg.storefront.iconFile.filename : '',
     iconSize: cfg.storefront.iconSize,
     iconOffset: cfg.storefront.iconOffset,
+    // Floating mobile button: file names (Liquid file_url), FR falls back to EN there.
+    floating: {
+      enabled: !!(cfg.storefront.floating && cfg.storefront.floating.enabled && cfg.storefront.floating.fileEn),
+      en: cfg.storefront.floating && cfg.storefront.floating.fileEn ? cfg.storefront.floating.fileEn.filename : '',
+      fr: cfg.storefront.floating && cfg.storefront.floating.fileFr ? cfg.storefront.floating.fileFr.filename : '',
+      corner: cfg.storefront.floating ? cfg.storefront.floating.corner : 'right',
+      top: cfg.storefront.floating ? cfg.storefront.floating.top : 80,
+      side: cfg.storefront.floating ? cfg.storefront.floating.side : 12,
+      height: cfg.storefront.floating ? cfg.storefront.floating.height : 40,
+    },
     privacyUrl: cfg.storefront.privacyUrl,
     proxyPath: cfg.storefront.proxyPath,
     gallerySelector: cfg.storefront.gallerySelector,
