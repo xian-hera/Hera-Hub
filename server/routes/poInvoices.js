@@ -1936,6 +1936,33 @@ async function getVariantSnapshot(client, barcode) {
 // last_cost still reflects the most recent cost received, promotional or
 // not, since it's meant to show "what did we last pay", not "what should
 // count toward the average".
+// Receiving location guard (2026-11-23, Hera — after OTT03 was deleted in
+// Shopify and merged into OTT01). Every PO keeps the Shopify location id it
+// was created with. Commit / Undo change the cost FIRST and the inventory at
+// that location second, so a location that no longer exists made the first
+// line's cost change and then the inventory step fail — and every retry
+// changed the cost again. Now the location is checked before ANY line is
+// written: missing or deactivated → the commit / undo stops with nothing
+// changed in Shopify.
+async function assertReceivingLocation(client, invoice) {
+  const name = invoice.location || 'the receiving location';
+  if (!invoice.shopify_location_id) {
+    throw new Error(`Receiving location ${name} has no Shopify location. Nothing was changed.`);
+  }
+  const resp = await shopifyRequest(client, `
+    query poReceivingLocation($id: ID!) {
+      location(id: $id) { id name isActive }
+    }
+  `, { id: invoice.shopify_location_id });
+  const loc = resp?.data?.location;
+  if (!loc) {
+    throw new Error(`Receiving location ${name} no longer exists in Shopify. Nothing was changed.`);
+  }
+  if (loc.isActive === false) {
+    throw new Error(`Receiving location ${name} is deactivated in Shopify. Nothing was changed.`);
+  }
+}
+
 async function commitInvoice(invoiceId) {
   const invRes = await pool.query('SELECT * FROM po_invoices WHERE id = $1', [invoiceId]);
   if (invRes.rows.length === 0) throw new Error('Invoice not found');
@@ -1959,6 +1986,9 @@ async function commitInvoice(invoiceId) {
   const session = await getSession();
   const shopify = getShopify();
   const client = new shopify.clients.Graphql({ session });
+
+  // Location still there? Checked before any line is written (2026-11-23).
+  await assertReceivingLocation(client, invoice);
 
   for (const item of items) {
     // Resumability: if a previous attempt at this commit already applied this
@@ -2324,6 +2354,9 @@ async function undoInvoiceCommit(invoiceId) {
   const session = await getSession();
   const shopify = getShopify();
   const client = new shopify.clients.Graphql({ session });
+
+  // Undo writes cost and inventory too — same location check first (2026-11-23).
+  await assertReceivingLocation(client, invoice);
 
   for (const item of itemsRes.rows) {
     // Not committed = already undone by an earlier (interrupted) attempt.

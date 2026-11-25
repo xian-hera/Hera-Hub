@@ -602,6 +602,22 @@ router.patch('/:id/commit', async (req, res) => {
   }
 });
 
+// Store-side submit guard (2026-11-25, Hera — task A2459): Submit / Complete
+// used to set status = 'reviewing' whatever the task's state, so a submit
+// from a store page left open after the buyer's commit put an archived task
+// back to 'reviewing' ("Partially committed by buyer" with every item already
+// committed). A task that is archived, or being committed right now, can't be
+// submitted. (Inventory was never touched — committed items are skipped.)
+function submitBlockedReason(task) {
+  if (task.status === 'archived' || task.status === 'committed') {
+    return 'This task was already committed by the buyer. Please reload the page.';
+  }
+  if (task.committing) {
+    return 'The buyer is committing this task right now. Please reload the page in a moment.';
+  }
+  return null;
+}
+
 // PATCH /api/tasks/:id/submit
 router.patch('/:id/submit', async (req, res) => {
   try {
@@ -609,6 +625,8 @@ router.patch('/:id/submit', async (req, res) => {
     const taskRes = await pool.query('SELECT * FROM tasks WHERE id = $1', [id]);
     const task = taskRes.rows[0];
     if (!task) return res.status(404).json({ error: 'Task not found' });
+    const blocked = submitBlockedReason(task);
+    if (blocked) return res.status(409).json({ error: blocked });
 
     await pool.query(
       "UPDATE tasks SET status = 'reviewing', updated_at = NOW() WHERE id = $1",
@@ -793,6 +811,8 @@ router.patch('/:id/complete-scan', async (req, res) => {
     if (!task.rows[0].scan_count_mode) {
       return res.status(400).json({ error: 'Task is not a Scan Count task' });
     }
+    const blocked = submitBlockedReason(task.rows[0]); // 2026-11-25, see submitBlockedReason
+    if (blocked) return res.status(409).json({ error: blocked });
     const shopifyLocationId = task.rows[0].shopify_location_id;
 
     const items = await pool.query('SELECT * FROM task_items WHERE task_id = $1', [id]);
