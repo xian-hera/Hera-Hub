@@ -3,7 +3,7 @@ import ReactDOM from 'react-dom';
 import Papa from 'papaparse';
 import {
   Page, Layout, Card, Button, ButtonGroup, BlockStack, InlineStack, Text, TextField,
-  Banner, Badge, Checkbox, Popover, ActionList, Modal
+  Banner, Badge, Checkbox, Popover, ActionList, Modal, Tooltip
 } from '@shopify/polaris';
 import { useNavigate, useParams } from 'react-router-dom';
 import InfoTooltip from '../../components/InfoTooltip';
@@ -226,9 +226,11 @@ function BuyerPOImportInvoice() {
   // Card 4 — inline editing / selection / add-item
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [editingItemId, setEditingItemId] = useState(null);
-  const [editingField, setEditingField] = useState(null); // 'quantity' | 'cost'
+  const [editingField, setEditingField] = useState(null); // 'quantity' | 'cost' | 'name' | 'code' | 'sku'
   const [editQtyDraft, setEditQtyDraft] = useState('');
   const [editCostDraft, setEditCostDraft] = useState('');
+  // SKU / Name / Supplier ID of a store-added "Extra" line (2026-11-25, Hera).
+  const [editTextDraft, setEditTextDraft] = useState('');
   const [savingItemEdit, setSavingItemEdit] = useState(false);
   const [deletingItems, setDeletingItems] = useState(false);
   const [addItemModalOpen, setAddItemModalOpen] = useState(false);
@@ -772,11 +774,18 @@ function BuyerPOImportInvoice() {
     setEditCostDraft(item.raw_cost !== null && item.raw_cost !== undefined ? String(item.raw_cost) : '');
   };
 
+  const startEditText = (item, field) => {
+    setEditingItemId(item.id);
+    setEditingField(field);
+    setEditTextDraft(item[field] || '');
+  };
+
   const cancelEditItem = () => {
     setEditingItemId(null);
     setEditingField(null);
     setEditQtyDraft('');
     setEditCostDraft('');
+    setEditTextDraft('');
   };
 
   const saveEditItem = async (itemId, field) => {
@@ -785,7 +794,9 @@ function BuyerPOImportInvoice() {
     try {
       const body = field === 'quantity'
         ? { quantity: editQtyDraft }
-        : { cost: editCostDraft === '' ? null : editCostDraft };
+        : (field === 'name' || field === 'code' || field === 'sku')
+          ? { [field]: editTextDraft }
+          : { cost: editCostDraft === '' ? null : editCostDraft };
       const res = await fetch(`/api/po-invoices/pending/${invoiceId}/items/${itemId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -1144,6 +1155,11 @@ function BuyerPOImportInvoice() {
   // still 'pending' (not yet sent to the store for counting).
   const itemsEditable = status === 'pending';
   const showStoreCountColumn = status === 'sent_to_store' || status === 'store_counted';
+  // 2026-11-25 (Hera): a line the store added while counting ("Extra",
+  // added_by_store) stays editable for Purchasing — SKU, Name, Supplier ID,
+  // Invoice Cost, Qty — until the invoice is committed.
+  const extraEditable = (it) => !!it.added_by_store
+    && ['pending', 'sent_to_store', 'store_counted'].includes(status) && !invoiceCommitting;
 
   const isUsdSupplier = supplier?.currency === 'USD';
 
@@ -1163,8 +1179,11 @@ function BuyerPOImportInvoice() {
   // A store-counted quantity that doesn't match the invoice quantity — only
   // meaningful once the Store count column is showing and this item has
   // actually been counted.
+  // A store-added Extra line with no invoice Qty yet (0) is not a mismatch —
+  // it has its own Extra pill.
   const isQtyMismatch = (it) => showStoreCountColumn
     && it.store_count !== null && it.store_count !== undefined
+    && !(it.added_by_store && Number(it.quantity) === 0)
     && Number(it.store_count) !== Number(it.quantity);
 
   // Priority: missing SKU first, then a manually-added (search-add) row,
@@ -1173,7 +1192,10 @@ function BuyerPOImportInvoice() {
   // mismatch), then everything else.
   // 2026-11-12: a row added with "Add Item" on a Store Counted invoice
   // (added_after_count) is pinned above everything else.
+  // 2026-11-25: a line the store added (added_by_store, Extra) is pinned first.
   const sortedItems = [...items].sort((a, b) => {
+    const storeDiff = (b.added_by_store ? 1 : 0) - (a.added_by_store ? 1 : 0);
+    if (storeDiff !== 0) return storeDiff;
     const addedDiff = (b.added_after_count ? 1 : 0) - (a.added_after_count ? 1 : 0);
     if (addedDiff !== 0) return addedDiff;
     const missingDiff = (b.is_missing ? 1 : 0) - (a.is_missing ? 1 : 0);
@@ -1761,7 +1783,8 @@ function BuyerPOImportInvoice() {
                             && rawCostCad.toFixed(2) !== Number(it.effective_cost).toFixed(2);
                           const isEditingQty = editingItemId === it.id && editingField === 'quantity';
                           const isEditingCost = editingItemId === it.id && editingField === 'cost';
-                          const qtyEdited = it.quantity_original !== null && it.quantity_original !== undefined
+                          // (not for a store-added Extra line — its original 0 means "not on the invoice")
+                          const qtyEdited = !it.added_by_store && it.quantity_original !== null && it.quantity_original !== undefined
                             && Number(it.quantity_original) !== Number(it.quantity);
                           const costEdited = it.raw_cost_original !== null && it.raw_cost_original !== undefined
                             && hasRawCost && Number(it.raw_cost_original) !== Number(it.raw_cost);
@@ -1779,7 +1802,11 @@ function BuyerPOImportInvoice() {
                                   <input type="checkbox" checked={selectedIds.has(it.id)} onChange={() => toggleSelectItem(it.id)} />
                                 </td>
                               )}
-                              <td style={{ padding: '10px' }}>
+                              {/* Name rendered before Product ID (it.code) to match the
+                                  swapped header order above. */}
+                              {/* 2026-11-25: SKU of a store-added Extra line is editable too. */}
+                              {['sku', 'name', 'code'].map(field => (field === 'sku' && !(editingItemId === it.id && editingField === 'sku') && !extraEditable(it)) ? (
+                              <td key={field} style={{ padding: '10px' }}>
                                 {it.is_missing ? (
                                   <InlineStack gap="100" blockAlign="center">
                                     <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#d72c0d', display: 'inline-block' }} />
@@ -1787,10 +1814,50 @@ function BuyerPOImportInvoice() {
                                   </InlineStack>
                                 ) : it.sku}
                               </td>
-                              {/* Name rendered before Product ID (it.code) to match the
-                                  swapped header order above. */}
-                              <td style={{ padding: '10px' }}>{it.name}</td>
-                              <td style={{ padding: '10px' }}>{it.code}</td>
+                              ) : (
+                                <td key={field} style={{ padding: '10px' }}>
+                                  {editingItemId === it.id && editingField === field ? (
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', whiteSpace: 'nowrap' }}>
+                                      <input
+                                        type="text"
+                                        value={editTextDraft}
+                                        onChange={(e) => setEditTextDraft(e.target.value)}
+                                        onKeyDown={(e) => { if (e.key === 'Enter' && !savingItemEdit) saveEditItem(it.id, field); }}
+                                        autoFocus
+                                        style={{
+                                          width: field === 'name' ? '14em' : (field === 'sku' ? '9em' : '7em'), padding: '4px 6px', fontSize: '13px',
+                                          border: '1px solid #c9cccf', borderRadius: '6px', boxSizing: 'content-box',
+                                        }}
+                                      />
+                                      <button
+                                        onClick={() => saveEditItem(it.id, field)}
+                                        disabled={savingItemEdit}
+                                        title="Save"
+                                        style={{
+                                          width: '22px', height: '22px', padding: 0, lineHeight: 1,
+                                          border: '1px solid #008060', borderRadius: '4px', background: '#e3f1df',
+                                          color: '#008060', cursor: savingItemEdit ? 'default' : 'pointer', fontWeight: 700,
+                                        }}
+                                      >✓</button>
+                                      <button
+                                        onClick={cancelEditItem}
+                                        disabled={savingItemEdit}
+                                        title="Cancel"
+                                        style={{
+                                          width: '22px', height: '22px', padding: 0, lineHeight: 1,
+                                          border: '1px solid #c9cccf', borderRadius: '4px', background: 'white',
+                                          color: '#6d7175', cursor: savingItemEdit ? 'default' : 'pointer', fontWeight: 700,
+                                        }}
+                                      >✕</button>
+                                    </span>
+                                  ) : extraEditable(it) ? (
+                                    // Store-added Extra line: click to fill in (2026-11-25).
+                                    <span style={{ cursor: 'pointer' }} onClick={() => startEditText(it, field)}>
+                                      {it[field] || <span style={{ color: '#8c9196' }}>—</span>}
+                                    </span>
+                                  ) : it[field]}
+                                </td>
+                              ))}
                               <td style={{ padding: '10px', fontWeight: highlighted && compareMode === 'invoice_cost' ? 'bold' : undefined }}>
                                 {isEditingCost ? (
                                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', whiteSpace: 'nowrap' }}>
@@ -1826,7 +1893,7 @@ function BuyerPOImportInvoice() {
                                       }}
                                     >✕</button>
                                   </span>
-                                ) : itemsEditable ? (
+                                ) : (itemsEditable || extraEditable(it)) ? (
                                   <span style={{ cursor: 'pointer' }} onClick={() => startEditCost(it)}>
                                     {costEdited && (
                                       <span style={{ textDecoration: 'line-through', color: '#8c9196', fontSize: '11px', marginRight: '6px' }}>
@@ -1900,7 +1967,7 @@ function BuyerPOImportInvoice() {
                                       }}
                                     >✕</button>
                                   </span>
-                                ) : itemsEditable ? (
+                                ) : (itemsEditable || extraEditable(it)) ? (
                                   <span style={{ cursor: 'pointer' }} onClick={() => startEditQty(it)}>
                                     {qtyEdited && (
                                       <span style={{ textDecoration: 'line-through', color: '#8c9196', fontSize: '11px', marginRight: '6px' }}>
@@ -1942,6 +2009,18 @@ function BuyerPOImportInvoice() {
                                       onClick={() => startEditStoreCount(it)}
                                     >
                                       {it.store_count}
+                                    </span>
+                                  )}
+                                  {it.added_by_store && (
+                                    // 2026-11-25 (Hera): the store added this line itself.
+                                    <span style={{ marginLeft: '6px' }}>
+                                      <Tooltip content="This item was not included, store manually added it.">
+                                        <span style={{
+                                          display: 'inline-block', padding: '1px 8px', borderRadius: '999px',
+                                          background: '#ffd79d', color: '#4f4700', fontSize: '12px', fontWeight: 600,
+                                          lineHeight: '18px', whiteSpace: 'nowrap', cursor: 'default',
+                                        }}>Extra</span>
+                                      </Tooltip>
                                     </span>
                                   )}
                                   <LineNoteIcon note={it.line_note} />

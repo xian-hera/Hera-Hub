@@ -47,6 +47,18 @@ function countHistory(item) {
   return h;
 }
 
+// Yellow "Extra" pill (2026-11-25): a line the store added with Add Unlisted
+// Item — it is not on the invoice. Same pill on the Purchasing invoice page.
+function ExtraPill() {
+  return (
+    <span style={{
+      display: 'inline-block', padding: '1px 8px', borderRadius: '999px',
+      background: '#ffd79d', color: '#4f4700', fontSize: '12px', fontWeight: 600,
+      lineHeight: '18px', whiteSpace: 'nowrap',
+    }}>Extra</span>
+  );
+}
+
 function TallyBars({ count }) {
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', marginRight: '6px', verticalAlign: 'middle' }}>
@@ -82,6 +94,17 @@ function ManagerPOReceivingDetail() {
   const [savingCount, setSavingCount] = useState(false);
 
   const [notFoundBarcode, setNotFoundBarcode] = useState('');
+
+  // Add Unlisted Item (2026-11-25, Hera): the store adds a line the invoice
+  // doesn't list — SKU typed or scanned, then qty. Opened from the button
+  // left of Mark All Correct, or from the "not found" scan popup (SKU filled).
+  const [unlistedOpen, setUnlistedOpen] = useState(false);
+  const [unlistedSku, setUnlistedSku] = useState('');
+  const [unlistedQty, setUnlistedQty] = useState('');
+  const [unlistedError, setUnlistedError] = useState('');
+  const [savingUnlisted, setSavingUnlisted] = useState(false);
+  const unlistedRef = useRef(false);
+  const unlistedQtyRef = useRef(null);
 
   const [showNoteInput, setShowNoteInput] = useState(false);
   const [noteInput, setNoteInput] = useState('');
@@ -121,6 +144,7 @@ function ManagerPOReceivingDetail() {
 
   useEffect(() => { popupRef.current = popupItem; }, [popupItem]);
   useEffect(() => { itemsRef.current = items; }, [items]);
+  useEffect(() => { unlistedRef.current = unlistedOpen; }, [unlistedOpen]);
 
   const fetchInvoice = useCallback(async () => {
     setLoading(true);
@@ -149,10 +173,10 @@ function ManagerPOReceivingDetail() {
   // never exceeds 100% width (see the wrapping div's overflowX below), so
   // this is just belt-and-suspenders.
   useEffect(() => {
-    const anyOpen = !!(popupItem || showSubmitConfirm);
+    const anyOpen = !!(popupItem || showSubmitConfirm || unlistedOpen);
     document.body.style.overflow = anyOpen ? 'hidden' : '';
     return () => { document.body.style.overflow = ''; };
-  }, [popupItem, showSubmitConfirm]);
+  }, [popupItem, showSubmitConfirm, unlistedOpen]);
 
   // Scanner listening — SKU not found shows a popup that auto-dismisses
   // after 2 seconds (no tap needed), per spec, rather than the tap-to-
@@ -160,6 +184,7 @@ function ManagerPOReceivingDetail() {
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (popupRef.current) return;
+      if (unlistedRef.current) return; // Add Unlisted Item popup has its own SKU box
       const activeTag = document.activeElement?.tagName;
       if (['INPUT', 'TEXTAREA'].includes(activeTag)) return;
 
@@ -171,13 +196,14 @@ function ManagerPOReceivingDetail() {
         // SKU first; a product's other barcodes are looked up in Shopify
         // only when that finds nothing (shared/scanMatch.js, 2026-11-13).
         findScannedItem(() => itemsRef.current, barcode, 'sku').then((matched) => {
-          if (popupRef.current) return; // a popup opened meanwhile
+          if (popupRef.current || unlistedRef.current) return; // a popup opened meanwhile
           if (matched) {
             openPopup(matched);
           } else {
             clearTimeout(notFoundTimer.current);
             setNotFoundBarcode(barcode);
-            notFoundTimer.current = setTimeout(() => setNotFoundBarcode(''), 2000);
+            // 2s → 4s (2026-11-25): time to tap "Add it as unlisted item".
+            notFoundTimer.current = setTimeout(() => setNotFoundBarcode(''), 4000);
           }
         });
         return;
@@ -299,6 +325,81 @@ function ManagerPOReceivingDetail() {
     const value = parseInt(countInput, 10);
     if (isNaN(value) || value < 0) { setCountError('input your count'); return; }
     saveCount(popupItem, { type: 'counted', value });
+  };
+
+  // ── Add Unlisted Item (2026-11-25) ──────────────────────────────────────
+  const openUnlisted = (sku) => {
+    clearTimeout(notFoundTimer.current);
+    setNotFoundBarcode('');
+    setUnlistedSku(sku || '');
+    setUnlistedQty('');
+    setUnlistedError('');
+    setUnlistedOpen(true);
+  };
+
+  const closeUnlisted = () => {
+    if (savingUnlisted) return;
+    setUnlistedOpen(false);
+    setUnlistedSku('');
+    setUnlistedQty('');
+    setUnlistedError('');
+  };
+
+  const handleSubmitUnlisted = async () => {
+    const sku = unlistedSku.trim();
+    if (!sku) { setUnlistedError('Enter or scan a SKU'); return; }
+    const qtyText = String(unlistedQty).trim();
+    const qty = parseInt(qtyText, 10);
+    if (!/^\d+$/.test(qtyText) || qty <= 0) { setUnlistedError('Enter a quantity of 1 or more'); return; }
+    setSavingUnlisted(true);
+    setUnlistedError('');
+    try {
+      // Already on this invoice (its SKU or another of its barcodes)? Then it
+      // is not unlisted — open its count popup with the number filled in.
+      const existing = await findScannedItem(() => itemsRef.current, sku, 'sku');
+      if (existing) {
+        setUnlistedOpen(false);
+        setUnlistedSku('');
+        setUnlistedQty('');
+        openPopup(existing);
+        setCountInput(String(qty));
+        return;
+      }
+      const res = await fetch(`/api/po-invoices/manager/receiving/${invoiceId}/items/unlisted`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sku, quantity: qtyText }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      setItems(prev => [data, ...prev.filter(i => i.id !== data.id)]);
+      setUnlistedOpen(false);
+      setUnlistedSku('');
+      setUnlistedQty('');
+    } catch (e) {
+      setUnlistedError(e.message);
+    } finally {
+      setSavingUnlisted(false);
+    }
+  };
+
+  // Remove a line the store added by mistake (Add Unlisted Item only).
+  const handleRemoveUnlisted = async () => {
+    if (!popupItem || !popupItem.added_by_store) return;
+    setSavingCount(true);
+    setCountError('');
+    try {
+      const res = await fetch(`/api/po-invoices/manager/receiving/${invoiceId}/items/${popupItem.id}/unlisted`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      const removedId = popupItem.id;
+      setItems(prev => prev.filter(i => i.id !== removedId));
+      closePopup();
+    } catch (e) {
+      setCountError(e.message);
+    } finally {
+      setSavingCount(false);
+    }
   };
 
   // Desktop-only bulk "Mark Correct" — hits the new bulk endpoint once for
@@ -583,6 +684,10 @@ function ManagerPOReceivingDetail() {
                   act on filteredItems (whatever the current All/Not
                   counted/Off qty pill shows), matching the select-all
                   checkbox in the table header below. */}
+              {/* 2026-11-25: Add Unlisted Item, left of Mark All Correct — shown
+                  on phones too (the bulk buttons stay desktop only). */}
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', flexWrap: 'wrap' }}>
+                <Button onClick={() => openUnlisted('')}>Add Unlisted Item</Button>
               <div className="po-bulk-actions" style={{ justifyContent: 'flex-end', gap: '8px' }}>
                 <Button onClick={handleMarkAllCorrect} loading={markingCorrect} disabled={markingCorrect || filteredItems.length === 0}>
                   Mark All Correct
@@ -590,6 +695,7 @@ function ManagerPOReceivingDetail() {
                 <Button onClick={handleMarkSelectedCorrect} loading={markingCorrect} disabled={markingCorrect || selectedIds.size === 0}>
                   Mark Selected Correct
                 </Button>
+              </div>
               </div>
 
               <Card>
@@ -638,11 +744,13 @@ function ManagerPOReceivingDetail() {
                               <div style={{ fontSize: '12px', color: '#6d7175' }}>{item.sku || '-'}</div>
                             </td>
                             <td style={{ padding: '10px', color: '#6d7175' }}>{item.wig_number || ''}</td>
-                            <td style={{ padding: '10px' }}>{item.quantity}</td>
+                            <td style={{ padding: '10px' }}>{item.added_by_store ? <ExtraPill /> : item.quantity}</td>
                             <td style={{ padding: '10px' }}>
                               {counted && <TallyBars count={countHistory(item).length} />}
                               {!counted ? (
                                 <Text tone="subdued">not counted</Text>
+                              ) : item.added_by_store ? (
+                                <span style={{ fontWeight: 700 }}>{item.store_count}</span>
                               ) : matches ? (
                                 <span style={{ color: '#008060', fontWeight: 700 }}>✓ {item.store_count}</span>
                               ) : (
@@ -663,7 +771,9 @@ function ManagerPOReceivingDetail() {
           </Layout.Section>
         </Layout>
 
-        {/* SKU not found — auto-dismisses after 2s, no tap needed */}
+        {/* SKU not found — auto-dismisses (no tap needed; 4s since 2026-11-25).
+            The overlay lets taps through to the page; only the box takes them,
+            for its "Add it as unlisted item" button (2026-11-25, Hera). */}
         {notFoundBarcode && (
           <div style={{
             position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
@@ -673,10 +783,89 @@ function ManagerPOReceivingDetail() {
             <div style={{
               background: 'white', borderRadius: '12px',
               padding: '24px 32px', maxWidth: '320px', textAlign: 'center',
-              boxShadow: '0 8px 24px rgba(0,0,0,0.2)',
+              boxShadow: '0 8px 24px rgba(0,0,0,0.2)', pointerEvents: 'auto',
             }}>
               <div style={{ fontSize: '32px', marginBottom: '12px' }}>⚠️</div>
               <Text variant="bodyLg" fontWeight="bold">SKU "{notFoundBarcode}" not found in this invoice.</Text>
+              <button
+                onClick={() => openUnlisted(notFoundBarcode)}
+                style={{
+                  marginTop: '16px', padding: '10px 18px', borderRadius: '8px',
+                  border: 'none', background: '#008060', color: 'white',
+                  fontSize: '15px', fontWeight: 600, cursor: 'pointer',
+                }}
+              >
+                Add it as unlisted item
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Add Unlisted Item popup (2026-11-25, Hera) */}
+        {unlistedOpen && (
+          <div style={{
+            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+            background: 'rgba(0,0,0,0.6)', zIndex: 1000,
+          }}>
+            <div style={{
+              position: 'fixed', top: '50%', left: '16px', right: '16px',
+              transform: 'translateY(-50%)', maxHeight: 'calc(100vh - 176px)', overflowY: 'auto',
+              background: 'white', borderRadius: '12px', padding: '24px',
+              maxWidth: '480px', margin: '0 auto', zIndex: 1001,
+            }} data-keypad-panel="center">
+              <button onClick={closeUnlisted} style={{
+                position: 'absolute', top: '12px', right: '12px',
+                background: 'none', border: 'none', fontSize: '20px', cursor: 'pointer', zIndex: 1,
+              }}>✕</button>
+              <BlockStack gap="400">
+                <div style={{ paddingRight: '28px' }}>
+                  <div style={{ fontSize: '16px', fontWeight: '700' }}>Add Unlisted Item</div>
+                  <div style={{ fontSize: '13px', color: '#6d7175' }}>An item you received that is not on this invoice.</div>
+                </div>
+                <input
+                  placeholder="Enter or scan SKU"
+                  value={unlistedSku}
+                  onChange={e => { setUnlistedSku(e.target.value); setUnlistedError(''); }}
+                  onKeyDown={e => {
+                    // A scanner ends with Enter → go on to the quantity.
+                    if (e.key === 'Enter') { e.preventDefault(); if (unlistedQtyRef.current) unlistedQtyRef.current.focus(); }
+                  }}
+                  autoComplete="off" autoFocus={!unlistedSku}
+                  style={{
+                    width: '100%', padding: '10px 12px', fontSize: '16px',
+                    border: '1px solid #c9cccf', borderRadius: '8px',
+                    outline: 'none', boxSizing: 'border-box', display: 'block',
+                  }}
+                  onFocus={e => { e.target.style.borderColor = '#005bd3'; }}
+                  onBlur={e => { e.target.style.borderColor = '#c9cccf'; }}
+                />
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <input
+                    ref={unlistedQtyRef}
+                    data-hub-keypad=""
+                    inputMode={keypad ? 'none' : 'numeric'}
+                    placeholder="Input qty"
+                    value={unlistedQty}
+                    onChange={e => { setUnlistedQty(e.target.value); setUnlistedError(''); }}
+                    onKeyDown={e => { if (e.key === 'Enter' && !savingUnlisted) handleSubmitUnlisted(); }}
+                    autoComplete="off" autoFocus={!!unlistedSku}
+                    style={{
+                      flex: 1, minWidth: 0, padding: '10px 12px', fontSize: '16px',
+                      border: '1px solid #c9cccf', borderRadius: '8px',
+                      outline: 'none', boxSizing: 'border-box', display: 'block',
+                    }}
+                    onFocus={e => { e.target.style.borderColor = '#005bd3'; }}
+                    onBlur={e => { e.target.style.borderColor = '#c9cccf'; }}
+                  />
+                  <Button onClick={handleSubmitUnlisted} loading={savingUnlisted}>Add</Button>
+                </div>
+                {unlistedError && (
+                  <div style={{ background: '#fff4f4', borderRadius: '8px', padding: '10px 14px',
+                    fontSize: '14px', color: '#d72c0d' }}>
+                    {unlistedError}
+                  </div>
+                )}
+              </BlockStack>
             </div>
           </div>
         )}
@@ -778,6 +967,20 @@ function ManagerPOReceivingDetail() {
                   </BlockStack>
                 )}
 
+                {/* A line the store added (not on the invoice) has no quantity
+                    to be Correct against — it gets Remove instead (2026-11-25). */}
+                {popupItem.added_by_store ? (
+                  <InlineStack align="space-between" blockAlign="center">
+                    <ExtraPill />
+                    <button onClick={handleRemoveUnlisted} disabled={savingCount} style={{
+                      background: 'white', color: '#c5192d', border: '1px solid #c5192d',
+                      borderRadius: '8px', padding: '6px 16px', fontSize: '14px',
+                      cursor: savingCount ? 'default' : 'pointer',
+                    }}>
+                      Remove this item
+                    </button>
+                  </InlineStack>
+                ) : (
                 <button onClick={handleCorrect} disabled={savingCount} style={{
                   background: '#008060', color: 'white', border: 'none',
                   borderRadius: '12px', padding: '20px', fontSize: '22px',
@@ -785,6 +988,7 @@ function ManagerPOReceivingDetail() {
                 }}>
                   Quantity {popupItem.quantity}　Correct
                 </button>
+                )}
 
                 {/* Saved line-item note (2026-10-22, Hera), at the bottom; the Note
                     button is left of the count box since 2026-11-12. */}

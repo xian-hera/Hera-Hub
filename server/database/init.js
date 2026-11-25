@@ -824,6 +824,10 @@ const initDatabase = async () => {
     // Counted invoice (POST /pending/:id/items/by-sku). Pinned to the top of
     // the invoice page with a light highlight.
     await client.query(`ALTER TABLE po_invoice_items ADD COLUMN IF NOT EXISTS added_after_count BOOLEAN NOT NULL DEFAULT FALSE`).catch(() => {});
+    // 2026-11-25 (Hera): a line the STORE added while counting ("Add Unlisted
+    // Item" — POST /manager/receiving/:id/items/unlisted). Not on the invoice
+    // (quantity 0); Purchasing sees it pinned to the top with a yellow Extra pill.
+    await client.query(`ALTER TABLE po_invoice_items ADD COLUMN IF NOT EXISTS added_by_store BOOLEAN NOT NULL DEFAULT FALSE`).catch(() => {});
 
     // Undo commit (2026-10-09): what commitInvoice() is about to change for
     // this line item, written BEFORE it touches Shopify so a retry after a

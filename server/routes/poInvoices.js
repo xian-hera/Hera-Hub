@@ -860,13 +860,43 @@ router.patch('/pending/:id/items/:itemId', async (req, res) => {
   try {
     const { id, itemId } = req.params;
     const { quantity, cost } = req.body;
+    // name / code (2026-11-25, Hera): Purchasing fills in a store-added
+    // "Extra" line (added_by_store) — Name and Supplier ID, besides Qty/Cost.
+    const { name, code } = req.body;
+    // sku (2026-11-25, Hera): Purchasing may change the SKU of a store-added
+    // Extra line only. Checked live in Shopify (must exist; a secondary barcode
+    // becomes its primary) and must not already be on this invoice. The new
+    // product's Name / Supplier ID / Supplier cost replace the old ones (a
+    // different product); a Name / Supplier ID sent in the same request still wins.
+    const { sku } = req.body;
 
-    const invRes = await pool.query('SELECT status FROM po_invoices WHERE id = $1', [id]);
+    const invRes = await pool.query(
+      `SELECT i.status, s.name AS supplier_name FROM po_invoices i JOIN po_suppliers s ON s.id = i.supplier_id WHERE i.id = $1`,
+      [id]
+    );
     if (invRes.rows.length === 0) return res.status(404).json({ error: 'Invoice not found' });
     if (['committed', 'archived'].includes(invRes.rows[0].status)) return res.status(400).json({ error: 'Invoice already committed' });
 
     const sets = [];
     const params = [];
+    if (sku !== undefined) {
+      const typed = String(sku || '').trim();
+      if (!typed) return res.status(400).json({ error: 'Enter a SKU' });
+      const itemRes = await pool.query('SELECT sku, added_by_store FROM po_invoice_items WHERE id = $1 AND invoice_id = $2', [itemId, id]);
+      if (itemRes.rows.length === 0) return res.status(404).json({ error: 'Item not found' });
+      if (!itemRes.rows[0].added_by_store) return res.status(400).json({ error: 'Only an item added by the store can change its SKU here.' });
+      const found = await lookupUnlistedVariant(typed, invRes.rows[0].supplier_name);
+      if (found.error) return res.status(400).json({ error: found.error });
+      if (found.sku !== itemRes.rows[0].sku) {
+        const dup = await pool.query('SELECT 1 FROM po_invoice_items WHERE invoice_id = $1 AND sku = $2 AND id <> $3 LIMIT 1', [id, found.sku, itemId]);
+        if (dup.rows.length > 0) return res.status(400).json({ error: `SKU ${found.sku} is already on this invoice.` });
+        params.push(found.sku); sets.push(`sku = $${params.length}`);
+        if (name === undefined) { params.push(found.name); sets.push(`name = $${params.length}`); }
+        if (code === undefined) { params.push(found.code); sets.push(`code = $${params.length}`); }
+        params.push(found.supplierCost); sets.push(`supplier_cost_raw = $${params.length}`);
+        sets.push('is_missing = FALSE');
+      }
+    }
     if (quantity !== undefined) {
       const q = parseFloat(quantity);
       if (isNaN(q) || q < 0) return res.status(400).json({ error: 'Invalid quantity' });
@@ -879,13 +909,23 @@ router.patch('/pending/:id/items/:itemId', async (req, res) => {
       params.push(c);
       sets.push(`raw_cost = $${params.length}`);
     }
-    if (sets.length === 0) return res.status(400).json({ error: 'Nothing to update' });
+    if (name !== undefined) {
+      params.push(String(name || '').trim() || null);
+      sets.push(`name = $${params.length}`);
+    }
+    if (code !== undefined) {
+      params.push(String(code || '').trim() || null);
+      sets.push(`code = $${params.length}`);
+    }
+    if (sets.length === 0 && sku === undefined) return res.status(400).json({ error: 'Nothing to update' });
 
+    if (sets.length > 0) {
     params.push(itemId, id);
     await client.query(
       `UPDATE po_invoice_items SET ${sets.join(', ')} WHERE id = $${params.length - 1} AND invoice_id = $${params.length}`,
       params
     );
+    }
 
     await recalculateInvoice(client, id);
 
@@ -1402,8 +1442,9 @@ router.get('/manager/receiving/:id', async (req, res) => {
     // instead of first. `id ASC` as the tiebreaker keeps ties (same name, or
     // several blanks) in their original insertion order rather than an
     // unstable/arbitrary one.
+    // 2026-11-25: rows the store added (Add Unlisted Item) come first.
     const itemsRes = await pool.query(
-      `SELECT * FROM po_invoice_items WHERE invoice_id = $1 ORDER BY LOWER(name) ASC NULLS LAST, id ASC`,
+      `SELECT * FROM po_invoice_items WHERE invoice_id = $1 ORDER BY added_by_store DESC, LOWER(name) ASC NULLS LAST, id ASC`,
       [id]
     );
     const items = itemsRes.rows;
@@ -1613,6 +1654,11 @@ router.patch('/manager/receiving/:id/items/:itemId/count', async (req, res) => {
     );
     if (cur.rows.length === 0) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Item not found' }); }
     const item = cur.rows[0];
+    // A store-added (unlisted) line has no invoice quantity to be "correct" against.
+    if (type === 'correct' && item.added_by_store) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'This item is not on the invoice — enter the count instead.' });
+    }
 
     let entry;
     if (type === 'correct') {
@@ -1641,6 +1687,180 @@ router.patch('/manager/receiving/:id/items/:itemId/count', async (req, res) => {
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('PATCH /api/po-invoices/manager/receiving/:id/items/:itemId/count error:', e);
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
+});
+
+// Live Shopify lookup for a store-added "Extra" line (2026-11-25, Hera) —
+// used by "Add Unlisted Item" and by Purchasing changing that line's SKU.
+// Active variants only. An exact primary barcode wins; otherwise the code must
+// be a secondary barcode of exactly one variant, and the primary barcode (=
+// Hub's SKU) is returned. Name from custom.name, else product + variant title;
+// Supplier ID / Supplier cost from the variant's supplier metafield group named
+// after the invoice's supplier, when there is one (else null).
+// Returns { error } or { sku, name, code, supplierCost }.
+async function lookupUnlistedVariant(typed, supplierNameRaw) {
+  const { getMetafieldSettings } = require('../jobs/poSkuUpdater');
+  const { groups } = await getMetafieldSettings();
+  const productFields = [];
+  const variantFields = [];
+  const addField = (cfg, alias) => {
+    const nk = cfg && cfg.namespaceKey;
+    if (!nk || !nk.includes('.')) return;
+    const i = nk.indexOf('.');
+    const gql = `${alias}: metafield(namespace: ${JSON.stringify(nk.slice(0, i))}, key: ${JSON.stringify(nk.slice(i + 1))}) { value }`;
+    (cfg.type === 'product' ? productFields : variantFields).push(gql);
+  };
+  (groups || []).forEach((g, i) => {
+    addField(g && g.name, `grp${i}Name`);
+    addField(g && g.code, `grp${i}Code`);
+    addField(g && g.cost, `grp${i}Cost`);
+  });
+
+  const { getShopify, getSession } = require('../shopify');
+  const session = await getSession();
+  const shopify = getShopify();
+  const gqlClient = new shopify.clients.Graphql({ session });
+  const response = await shopifyRequest(gqlClient, `
+    query unlistedSku($filter: String!) {
+      productVariants(first: 10, query: $filter) {
+        edges { node {
+          barcode
+          title
+          customName: metafield(namespace: "custom", key: "name") { value }
+          ${variantFields.join('\n')}
+          product { title ${productFields.join('\n')} }
+        } }
+      }
+    }
+  `, { filter: activeFilter(`barcode:${searchQuote(typed)}`) });
+  const all = ((response && response.data && response.data.productVariants && response.data.productVariants.edges) || [])
+    .map(e => e.node).filter(n => n && n.barcode);
+  const exact = all.filter(n => n.barcode === typed);
+  const nodes = exact.length > 0 ? exact : all;
+  if (nodes.length === 0) return { error: `SKU ${typed} was not found in Shopify (active products).` };
+  if (nodes.length > 1) return { error: `More than one active product has SKU ${typed}.` };
+  const v = nodes[0];
+
+  const read = (alias) => {
+    const x = (v.product && v.product[alias]) || v[alias];
+    return x && x.value !== undefined && x.value !== null ? String(x.value).trim() : '';
+  };
+  const supplierName = String(supplierNameRaw || '').trim().toLowerCase();
+  const gi = supplierName === '' ? -1 : (groups || []).findIndex((g, i) => read(`grp${i}Name`).toLowerCase() === supplierName);
+  let code = null;
+  let supplierCost = null;
+  if (gi >= 0) {
+    code = read(`grp${gi}Code`) || null;
+    const c = parseFloat(read(`grp${gi}Cost`));
+    supplierCost = isNaN(c) ? null : c;
+  }
+  const name = (v.customName && v.customName.value)
+    || [v.product && v.product.title, v.title && v.title !== 'Default Title' ? v.title : null].filter(Boolean).join(' - ')
+    || null;
+  return { sku: v.barcode, name, code, supplierCost };
+}
+
+// POST /api/po-invoices/manager/receiving/:id/items/unlisted
+// body: { sku, quantity }   (2026-11-25, Hera) "Add Unlisted Item"
+// The store received something the invoice doesn't list. The scanned/typed
+// code is looked up live in Shopify (active variants; a secondary barcode
+// resolves to the product's primary barcode = Hub's SKU) — it must exist,
+// since Commit adds inventory by SKU. Name comes from Shopify; Supplier ID
+// and Supplier cost from the variant's supplier metafield group named after
+// this invoice's supplier, when there is one (otherwise left blank for
+// Purchasing to fill in — a blank cost only skips the cost update at Commit).
+// The row: quantity 0 (not on the invoice), store_count = qty with one
+// 'counted' history entry (more counts add to it like any other line),
+// added_manually + added_by_store = TRUE (pinned, yellow Extra pill on the
+// Purchasing side). Refused: invoice not sent_to_store · SKU not found ·
+// SKU already on this invoice (count that line instead).
+router.post('/manager/receiving/:id/items/unlisted', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const typed = String((req.body && req.body.sku) || '').trim();
+    const qty = parseInt(req.body && req.body.quantity, 10);
+    if (!typed) return res.status(400).json({ error: 'Enter a SKU' });
+    if (isNaN(qty) || qty <= 0 || String(qty) !== String(req.body.quantity).trim()) {
+      return res.status(400).json({ error: 'Quantity must be a whole number of 1 or more' });
+    }
+
+    const invRes = await pool.query(
+      `SELECT i.*, s.name AS supplier_name FROM po_invoices i JOIN po_suppliers s ON s.id = i.supplier_id WHERE i.id = $1`,
+      [id]
+    );
+    if (invRes.rows.length === 0) return res.status(404).json({ error: 'Invoice not found' });
+    const invoice = invRes.rows[0];
+    if (invoice.status !== 'sent_to_store') return res.status(400).json({ error: 'This invoice is no longer open for counting. Please reload the page.' });
+
+    const found = await lookupUnlistedVariant(typed, invoice.supplier_name);
+    if (found.error) return res.status(400).json({ error: found.error });
+    const { sku, name, code, supplierCost } = found;
+
+    await client.query('BEGIN');
+    // Re-checked inside the transaction: still counting, and this SKU not on
+    // the invoice yet (also guards a double tap / two devices).
+    const lock = await client.query('SELECT status FROM po_invoices WHERE id = $1 FOR UPDATE', [id]);
+    if (!lock.rows[0] || lock.rows[0].status !== 'sent_to_store') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'This invoice is no longer open for counting. Please reload the page.' });
+    }
+    const dup = await client.query('SELECT 1 FROM po_invoice_items WHERE invoice_id = $1 AND sku = $2 LIMIT 1', [id, sku]);
+    if (dup.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: `SKU ${sku} is already on this invoice — count it there instead.` });
+    }
+    const history = [{ type: 'counted', value: qty, at: new Date().toISOString(), addedByStore: true }];
+    const inserted = await client.query(
+      `INSERT INTO po_invoice_items
+         (invoice_id, code, sku, name, quantity, raw_cost, supplier_cost_raw, is_missing, quantity_original, raw_cost_original,
+          added_manually, added_by_store, store_count, count_history)
+       VALUES ($1,$2,$3,$4,0,NULL,$5,FALSE,0,NULL,TRUE,TRUE,$6,$7::jsonb) RETURNING id`,
+      [id, code, sku, name, supplierCost, qty, JSON.stringify(history)]
+    );
+    await recalculateInvoice(client, id);
+    await client.query('COMMIT');
+    const row = await client.query('SELECT * FROM po_invoice_items WHERE id = $1', [inserted.rows[0].id]);
+    res.json(row.rows[0]);
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('POST /api/po-invoices/manager/receiving/:id/items/unlisted error:', e);
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
+});
+
+// DELETE /api/po-invoices/manager/receiving/:id/items/:itemId/unlisted
+// (2026-11-25) The store takes back a line it added by mistake with "Add
+// Unlisted Item" — only that kind of line, only while still counting.
+router.delete('/manager/receiving/:id/items/:itemId/unlisted', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id, itemId } = req.params;
+    await client.query('BEGIN');
+    const inv = await client.query('SELECT status FROM po_invoices WHERE id = $1 FOR UPDATE', [id]);
+    if (!inv.rows[0] || inv.rows[0].status !== 'sent_to_store') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'This invoice is no longer open for counting. Please reload the page.' });
+    }
+    const del = await client.query(
+      'DELETE FROM po_invoice_items WHERE id = $1 AND invoice_id = $2 AND added_by_store = TRUE RETURNING id',
+      [itemId, id]
+    );
+    if (del.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Only items added by the store can be removed.' });
+    }
+    await recalculateInvoice(client, id);
+    await client.query('COMMIT');
+    res.json({ removed: del.rows[0].id });
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('DELETE /api/po-invoices/manager/receiving/:id/items/:itemId/unlisted error:', e);
     res.status(500).json({ error: e.message });
   } finally {
     client.release();
@@ -1719,6 +1939,9 @@ router.post('/manager/receiving/:id/items/mark-correct', async (req, res) => {
       );
       if (cur.rows.length === 0) continue;
       const item = cur.rows[0];
+      // 2026-11-25: a store-added (unlisted) line has no invoice quantity —
+      // Mark Correct would set its count to 0, so it is left as counted.
+      if (item.added_by_store) continue;
 
       const entry = { type: 'correct', value: Number(item.quantity) || 0, at: new Date().toISOString() };
       let history = Array.isArray(item.count_history) ? item.count_history : [];
