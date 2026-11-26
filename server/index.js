@@ -5,9 +5,9 @@ const path = require('path');
 const fs = require('fs');
 const { setupShopify } = require('./shopify');
 const { initDatabase } = require('./database/init');
-const birthdayRoute = require('./routes/birthday');
-const { router: birthdayConfigRouter, registerRestartFn } = require('./routes/birthdayConfig');
-const { startBirthdayScheduler } = require('./jobs/birthdayScheduler');
+// Online › Birthday Reward removed 2026-11-26 (Hera): its webhook (/api/birthday),
+// config API (/api/birthday-config) and daily Remove Tag job are gone. The
+// birthday_* tables are left in the database, unused.
 const { startSyncScheduler } = require('./jobs/syncVariantIndex');
 const { startNewArrivalScheduler } = require('./jobs/newArrivalScheduler');
 const { startOnlineTaskHistoryScheduler } = require('./jobs/onlineTaskHistory'); // Online Dashboard, 2026-10-01
@@ -20,10 +20,6 @@ const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(cors());
-
-// Birthday webhook must be registered before express.json()
-// because it needs raw body for HMAC verification
-app.use('/api/birthday', birthdayRoute);
 
 // Connecteam webhook — registered before express.json() so raw body is available if needed
 // (currently uses JSON body, but keeping it early in case HMAC verification is added later)
@@ -55,7 +51,6 @@ app.use('/api/label-templates', require('./routes/labelTemplates'));
 app.use('/api/label-print-tasks', require('./routes/labelPrintTasks'));
 app.use('/api/price-change-tasks', require('./routes/priceChangeTasks'));
 app.use('/api/hairdressers', require('./routes/hairdressers'));
-app.use('/api/birthday-config', birthdayConfigRouter);
 app.use('/api/influencers', require('./routes/influencers'));
 app.use('/api/settings', require('./routes/settings'));
 // Per-account PIN + Store location memory (2026-09-29) — see routes/accountMemory.js
@@ -75,6 +70,8 @@ app.use('/api/store-supply', require('./routes/storeSupply')); // Warehouse › 
 // Online Boxes (2026-11-10, claude/FULFILLER_ONLINE_BOXES.md) — before the
 // general /api/integration router; same key check.
 app.use('/api/integration/online-boxes', require('./routes/onlineBoxes').router);
+// Online Supply (2026-11-26, claude/FULFILLER_ONLINE_SUPPLY.md) — same flow as Online Boxes.
+app.use('/api/integration/online-supplies', require('./routes/onlineBoxes').supplyRouter);
 app.use('/api/integration', require('./routes/onlineTransfers').integrationRouter);
 app.use('/api/online-transfers', require('./routes/onlineTransfers').adminRouter);
 app.use('/api/manager-history', require('./routes/managerHistory').router);
@@ -129,8 +126,6 @@ app.use((err, req, res, next) => {
 const startServer = async () => {
   try {
     await initDatabase();
-    await startBirthdayScheduler();
-    registerRestartFn(startBirthdayScheduler);
     await startSyncScheduler();
     startNewArrivalScheduler();
     startOnlineTaskHistoryScheduler();

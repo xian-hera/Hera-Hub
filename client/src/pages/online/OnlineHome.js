@@ -24,7 +24,7 @@ const PIN_EXPIRY_DAYS         = 30;
 const TABS = [
   { id: 'dashboard', label: 'Dashboard', path: '/online' },
   { id: 'new-products', label: 'New Products', path: '/online/new-products' },
-  { id: 'birthday-reward', label: 'Birthday Reward', path: '/online/birthday-reward' },
+  // Birthday Reward tab removed 2026-11-26 (Hera).
   { id: 'influencers', label: 'Influencer Management', path: '/online/influencers' },
   { id: 'swatch', label: 'Swatch', path: '/online/swatch' },
   // Publication (2026-10-15, Hera) — claude/PUBLICATION_FEATURE_SPEC.md

@@ -16,6 +16,12 @@ async function ensureOnlineBoxesColumns(client) {
   await client.query('ALTER TABLE wh_tasks ADD COLUMN IF NOT EXISTS ob_sent_date DATE');
   await client.query('ALTER TABLE wh_tasks ADD COLUMN IF NOT EXISTS ob_sent_half TEXT');
   await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_wh_tasks_online_boxes ON wh_tasks (ob_request_id) WHERE kind = 'online_boxes'`);
+  // Online Supply (2026-11-26, Hera — claude/FULFILLER_ONLINE_SUPPLY.md): a
+  // supply order from Fulfiller is the same kind of card, kind 'online_boxes'
+  // with ob_kind 'supply' (existing rows: 'boxes'). ob_items then holds
+  // [{ title, quantity, packSize, text }]. ob_request_id stays unique across
+  // both (the index above); the routes refuse an id the other kind already uses.
+  await client.query(`ALTER TABLE wh_tasks ADD COLUMN IF NOT EXISTS ob_kind TEXT NOT NULL DEFAULT 'boxes'`);
 }
 
 module.exports = { ensureOnlineBoxesColumns };

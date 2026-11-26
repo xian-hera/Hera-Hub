@@ -494,8 +494,11 @@ async function loadSchedule(db, view = 'current') {
     if (w.kind === 'online_boxes') {
       // Online Boxes from Fulfiller (2026-11-10): HQ → store; hover lists the
       // boxes. Can't be split or deleted (Fulfiller cancels it).
+      // obKind (2026-11-26): 'boxes' | 'supply' — Online Supply rides on the
+      // same kind (onlineBoxesSchema.js); items are then [{ title, quantity, packSize, text }].
       return {
         ...base, from: HQ, to: w.to_location || '', requestId: w.ob_request_id,
+        obKind: w.ob_kind || 'boxes',
         items: Array.isArray(w.ob_items) ? w.ob_items : [], note: w.ob_note || '',
       };
     }
@@ -872,6 +875,7 @@ async function descendantIds(client, id) {
 // POST /api/warehouse/tasks/delete { ids } — the page offers it for
 // Unscheduled tasks only. Saved immediately.
 //   custom          → deleted
+//   supply          → hidden for good (row kept with removed_at), 2026-11-26
 //   transfer        → hidden for good (row kept with removed_at)
 //   PO (not split / original)  → hidden for good, every task split from it deleted
 //   PO split child  → deleted together with anything split from it; its PB
@@ -902,11 +906,20 @@ router.post('/tasks/delete', async (req, res) => {
       // goes away with the task (2026-10-21 review — refusing forced a Save of
       // the whole draft first).
       if (t.kind === 'supply') {
-        // Store Supply tasks can't be deleted (2026-11-10, Hera).
-        throw Object.assign(new Error('Store Supply tasks can’t be deleted.'), { status: 400 });
+        // Store Supply tasks couldn't be deleted (2026-11-10); since 2026-11-26
+        // (Hera) WH can delete one from Unscheduled. Hidden for good (row kept
+        // with removed_at) — a real DELETE would let ensureSupplyTasks() create
+        // it again from the approved request. The store's request is not
+        // changed. If its items were already taken off Inventory (it left HQ),
+        // they go back.
+        if (t.supply_deducted_at) await SS.applySupplyInventory(client, [id], false);
+        await client.query(
+          'UPDATE wh_tasks SET removed_at = NOW(), sched_date = NULL, sched_half = NULL, sched_pos = NULL, updated_at = NOW() WHERE id = $1',
+          [id]
+        );
       } else if (t.kind === 'online_boxes') {
-        // Online Boxes: only Fulfiller can cancel them (2026-11-10, Hera).
-        throw Object.assign(new Error('Online Boxes can’t be deleted here — Fulfiller cancels them.'), { status: 400 });
+        // Online Boxes / Online Supply: only Fulfiller can cancel them (2026-11-10, Hera).
+        throw Object.assign(new Error(`${t.ob_kind === 'supply' ? 'Online Supply' : 'Online Boxes'} can’t be deleted here — Fulfiller cancels them.`), { status: 400 });
       } else if (t.kind === 'custom') {
         await client.query('DELETE FROM wh_tasks WHERE id = $1', [id]);
       } else if (t.kind === 'transfer') {
@@ -1321,7 +1334,7 @@ function buildStops(rows, online = []) {
     number: w.kind === 'po' ? `${w.po_number || ''}${w.split_no ? `-${w.split_no}` : ''}`
       : w.kind === 'transfer' ? (w.shopify_transfer_name || w.transfer_no || '')
       : w.kind === 'supply' ? 'Supply'
-      : w.kind === 'online_boxes' ? 'Online Boxes'
+      : w.kind === 'online_boxes' ? (w.ob_kind === 'supply' ? 'Online Supply' : 'Online Boxes')
       : (w.custom_title || ''),
     online: false,
     delivered: !!w.delivered_at, picked: !!w.picked_at,
@@ -1399,7 +1412,7 @@ router.post('/delivery/done', async (req, res) => {
     const failed = [];
     let done = 0;
     for (const w of rows) {
-      const number = w.shopify_transfer_name || w.transfer_no || w.po_number || w.custom_title || (w.kind === 'supply' ? 'Supply' : w.kind === 'online_boxes' ? 'Online Boxes' : String(w.id));
+      const number = w.shopify_transfer_name || w.transfer_no || w.po_number || w.custom_title || (w.kind === 'supply' ? 'Supply' : w.kind === 'online_boxes' ? (w.ob_kind === 'supply' ? 'Online Supply' : 'Online Boxes') : String(w.id));
       try {
         if (w.kind === 'transfer') {
           const { dispatchOne } = require('./transfers'); // Shopify client lives there

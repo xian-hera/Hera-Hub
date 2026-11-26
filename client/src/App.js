@@ -70,8 +70,7 @@ const CashSettings = lazyWithReload(() => import(/* webpackChunkName: "crm" */ '
 // their own online_pin instead of crm_pin. See pages/online/OnlineHome.js.
 const OnlineHome = lazyWithReload(() => import(/* webpackChunkName: "online" */ './pages/online/OnlineHome'));
 const OnlineSettings = lazyWithReload(() => import(/* webpackChunkName: "online" */ './pages/online/OnlineSettings'));
-const BirthdayReward = lazyWithReload(() => import(/* webpackChunkName: "online" */ './pages/online/BirthdayReward'));
-const BirthdayOrders = lazyWithReload(() => import(/* webpackChunkName: "online" */ './pages/online/BirthdayOrders'));
+// Birthday Reward (+ its Orders page) removed 2026-11-26 (Hera).
 const InfluencerList = lazyWithReload(() => import(/* webpackChunkName: "online" */ './pages/online/InfluencerList'));
 const InfluencerDetail = lazyWithReload(() => import(/* webpackChunkName: "online" */ './pages/online/InfluencerDetail'));
 // Import Products (buyer) + New products (online) — 2026-09-24, see claude/IMPORT_PRODUCTS_FEATURE_SPEC.md
@@ -258,8 +257,6 @@ function App() {
           {/* Online tabs (2026-10-01): OnlineHome = PIN gate + header + tab bar around each tab page */}
           <Route path="/online" element={<OnlineHome tab="dashboard"><OnlineDashboard /></OnlineHome>} />
           <Route path="/online/settings" element={<OnlineSettings />} />
-          <Route path="/online/birthday-reward" element={<OnlineHome tab="birthday-reward"><BirthdayReward inTabs /></OnlineHome>} />
-          <Route path="/online/birthday-reward/orders" element={<BirthdayOrders />} />
           <Route path="/online/influencers" element={<OnlineHome tab="influencers"><InfluencerList inTabs /></OnlineHome>} />
           <Route path="/online/influencers/:id" element={<InfluencerDetail />} />
           <Route path="/online/new-products" element={<OnlineHome tab="new-products"><OnlineNewProducts inTabs /></OnlineHome>} />

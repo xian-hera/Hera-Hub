@@ -156,6 +156,7 @@ const pairColor = (transferId) => PAIR_COLORS[Math.abs(Number(transferId) || 0) 
 //   custom          → Title + Note
 //   supply          → Store Supply items "name ×qty" (2026-11-10)
 //   online_boxes    → Online Boxes (Fulfiller) rows "code · dimension ×qty" (2026-11-10)
+//                     Online Supply (obKind 'supply') → each row's text (2026-11-26)
 // "Tracked back" is added under any box that is shown. Rendered in a portal
 // with fixed position so the calendar's scroll box and the page's centring
 // transform can't clip or shift it.
@@ -173,6 +174,18 @@ function HoverBox({ task, rect }) {
     );
   } else if (task.kind === 'transfer') {
     if (task.leg) body = <div><b>{task.from}</b> ➔ <b>{task.to}</b></div>;
+  } else if (task.kind === 'online_boxes' && task.obKind === 'supply') {
+    // Online Supply (2026-11-26, Hera): each row's text from Fulfiller as is,
+    // one per line, e.g. "Box tape, 3 Bundles".
+    body = (
+      <>
+        <div style={{ fontWeight: 700, marginBottom: 2 }}>Online Supply</div>
+        {(task.items || []).map((it, i) => (
+          <div key={i}>{it.text || `${it.title}, ${it.quantity}`}</div>
+        ))}
+        {task.note && <div style={{ whiteSpace: 'pre-wrap', marginTop: 4, color: '#6d7175' }}>{task.note}</div>}
+      </>
+    );
   } else if (task.kind === 'online_boxes') {
     body = (
       <>
@@ -313,7 +326,8 @@ function TaskCard({ task, selected, onToggle, onOpenNumber, order, compact, lock
     second = <LocPill name={where} />;
   } else if (task.kind === 'online_boxes') {
     // Online Boxes from Fulfiller (2026-11-10, Hera): line 1 "Online Boxes", line 2 the location.
-    first = <span style={{ fontWeight: 700 }}>Online Boxes</span>;
+    // Online Supply (2026-11-26): line 1 "Online Supply".
+    first = <span style={{ fontWeight: 700 }}>{task.obKind === 'supply' ? 'Online Supply' : 'Online Boxes'}</span>;
     second = <LocPill name={where} />;
   } else {
     // Custom: the pickup truck moved up to line 1 after the title, like
@@ -704,9 +718,11 @@ function WarehouseSchedule() {
   const singleScheduled = single && where[single.id] ? where[single.id] : null;
   const canSplit = allUnscheduled && single && single.kind === 'po' && (single.pbCount || 0) > 1;
   const slotLen = singleScheduled ? (slots[singleScheduled.key] || []).length : 0;
-  // Store Supply tasks can't be deleted (2026-11-10, Hera).
+  // Store Supply tasks couldn't be deleted (2026-11-10); since 2026-11-26 (Hera)
+  // they can, from Unscheduled only (not a tracked-back one).
   const canDelete = selTasks.length > 0 && selUn.length + selTracked.length === selTasks.length
-    && !selTasks.some(t => t.kind === 'supply' || t.kind === 'online_boxes'); // Online Boxes: Fulfiller cancels them
+    && !selTasks.some(t => t.kind === 'supply' && !selUn.includes(t))
+    && !selTasks.some(t => t.kind === 'online_boxes'); // Online Boxes / Online Supply: Fulfiller cancels them
   // Partner highlight: the other card of a split transfer that is hovered / selected.
   const litPairs = useMemo(() => {
     const s = new Set(selTasks.filter(t => t.kind === 'transfer' && t.leg).map(t => t.transferId));
@@ -1034,6 +1050,7 @@ function WarehouseSchedule() {
     if (hasSplits) lines.push('Every task split from it will be deleted too, also split tasks that are already on the calendar.');
     if (hasChildTask) lines.push('A split task’s P / B qty goes back to the task it was split from.');
     if (selTasks.some(t => t.kind === 'transfer' && t.leg)) lines.push('Both cards of a store-to-store transfer (store ➔ HQ and HQ ➔ store) are deleted together, also if the other one is already on the calendar.');
+    if (selTasks.some(t => t.kind === 'supply')) lines.push('The store’s Store Supply request is not changed; its items will not be delivered by this task.');
     lines.push('Deleted tasks do not come back. POs and Transfers themselves are not changed.');
     if (!window.confirm(lines.join('\n\n'))) return;
     setBusy(true);
@@ -1192,7 +1209,7 @@ function WarehouseSchedule() {
             </InlineStack>
             <InlineStack gap="200" blockAlign="end" wrap>
               <InlineStack gap="100">
-                {filterBtn('all', 'All')}{filterBtn('po', 'PO')}{filterBtn('transfer', 'Transfer')}{filterBtn('supply', 'Store Supply')}{filterBtn('online_boxes', 'Online Boxes')}{filterBtn('custom', 'Other')}
+                {filterBtn('all', 'All')}{filterBtn('po', 'PO')}{filterBtn('transfer', 'Transfer')}{filterBtn('supply', 'Store Supply')}{filterBtn('online_boxes', 'Online')}{filterBtn('custom', 'Other')}
               </InlineStack>
               <Button onClick={() => setCreateOpen(true)}>Create task</Button>
             </InlineStack>
