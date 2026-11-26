@@ -51,6 +51,9 @@ function BuyerPOInvoiceDetail() {
   // longer a committed one (GET /committed/:id → 404), moves to its pending
   // detail page.
   const [undoModalOpen, setUndoModalOpen] = useState(false);
+  // Note (2026-11-26, Hera): the store's reply (and Purchasing's own note)
+  // stay on a committed/archived invoice — shown read-only here.
+  const [noteModalOpen, setNoteModalOpen] = useState(false);
   const [undoConfirmText, setUndoConfirmText] = useState('');
   const [startingUndo, setStartingUndo] = useState(false);
   const undoing = !!(invoice && invoice.undoing);
@@ -240,6 +243,11 @@ function BuyerPOInvoiceDetail() {
           loading: undoing,
           disabled: undoing,
         }] : []),
+        // Note (2026-11-26) — only when the invoice has one, read-only.
+        ...((invoice.buyer_note || invoice.manager_note) ? [{
+          content: 'Note •',
+          onAction: () => setNoteModalOpen(true),
+        }] : []),
         { content: 'Export PDF', onAction: handleExportPdf, loading: exportingPdf, disabled: exportingPdf },
         { content: 'Delete', destructive: true, onAction: handleDelete },
       ]}
@@ -380,6 +388,32 @@ function BuyerPOInvoiceDetail() {
           </BlockStack>
         </Layout.Section>
       </Layout>
+
+      {/* Read-only Note (2026-11-26, Hera) — same layout as the Note modal on
+          the open invoice page, without Add / Delete. */}
+      <Modal
+        open={noteModalOpen}
+        onClose={() => setNoteModalOpen(false)}
+        title="Note"
+        secondaryActions={[{ content: 'Close', onAction: () => setNoteModalOpen(false) }]}
+      >
+        <Modal.Section>
+          <BlockStack gap="300">
+            {invoice.buyer_note && (
+              <BlockStack gap="100">
+                <Text variant="bodySm" tone="subdued">Your note{invoice.buyer_note_at ? ` — ${new Date(invoice.buyer_note_at).toLocaleString()}` : ''}</Text>
+                <Text>{invoice.buyer_note}</Text>
+              </BlockStack>
+            )}
+            {invoice.manager_note && (
+              <BlockStack gap="100">
+                <Text variant="bodySm" tone="subdued">Manager reply{invoice.manager_note_at ? ` — ${new Date(invoice.manager_note_at).toLocaleString()}` : ''}</Text>
+                <Text>{invoice.manager_note}</Text>
+              </BlockStack>
+            )}
+          </BlockStack>
+        </Modal.Section>
+      </Modal>
 
       <Modal
         open={undoModalOpen}

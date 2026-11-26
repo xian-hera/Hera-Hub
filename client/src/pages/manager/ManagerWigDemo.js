@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom'; // tap tooltip (2026-11-26)
 import {
   Page, Layout, Card, BlockStack, InlineStack,
   Text, Banner, TextField, Button
@@ -108,13 +109,14 @@ function DemoRow({ item, showDate }) {
     <div className={`mwd-row mwd-data-row${showDate ? '' : ' mwd-dateoff'}`}>
       <div className="mwd-name-cell">
         <div className="mwd-sku">{item.barcode}</div>
-        <div className="mwd-name-line">
+        {/* mwd-tip (2026-11-26, Hera): cut off with "…" on a phone → tap for the full text */}
+        <div className="mwd-name-line mwd-tip">
           {namePrefix && <span className="mwd-name-prefix">{namePrefix}</span>}
           {nameMain}
         </div>
         <div className="mwd-color-line">{item.variant_name || '-'}</div>
       </div>
-      <div className="mwd-vendor">{item.vendor || '-'}</div>
+      <div className="mwd-vendor mwd-tip">{item.vendor || '-'}</div>
       <div>
         <span className="mwd-date-desktop">{formatDemoDate(item.created_at)}</span>
         {showDate && <span className="mwd-date-mobile">{formatDemoDateShort(item.created_at)}</span>}
@@ -453,6 +455,33 @@ function ManagerWigDemo() {
   // to OFF on every page re-entry (no persistence), matching Hera's
   // "默认为 OFF" — there was no request to remember it across visits.
   const [showDate, setShowDate] = useState(false);
+
+  // Tap tooltip (2026-11-26, Hera): on a phone, a Name or Vendor cut off with
+  // "…" (.mwd-tip) shows its full text in a small white box when tapped. Only
+  // when the text really is cut off (scrollWidth > clientWidth), so desktop —
+  // where nothing is cut — never shows it. Any other tap, or scrolling, closes it.
+  const [tapTip, setTapTip] = useState(null); // { text, left, top, below }
+  useEffect(() => {
+    const onClick = (e) => {
+      const el = e.target && e.target.closest ? e.target.closest('.mwd-tip') : null;
+      if (el && el.scrollWidth > el.clientWidth + 1) {
+        const r = el.getBoundingClientRect();
+        const below = r.bottom + 80 < window.innerHeight;
+        setTapTip({ text: el.textContent, left: r.left, top: below ? r.bottom + 6 : r.top - 6, below });
+      } else {
+        setTapTip(null);
+      }
+    };
+    const close = () => setTapTip(null);
+    document.addEventListener('click', onClick);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      document.removeEventListener('click', onClick);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, []);
 
   // Which cards are expanded (2026-09-17, Hera: cards default collapsed to a
   // one-line "name + demo count" header, same as Buyer's per-location cards
@@ -824,7 +853,11 @@ function ManagerWigDemo() {
         .mwd-wignum { font-size: 12px; word-break: break-word; text-align: left; }
         .mwd-date-toggle { display: none; }
         @media (max-width: 767px) {
-          .mwd-row { grid-template-columns: 1fr 78px 56px 40px; }
+          /* 2026-11-26 (Hera): was 1fr 78px 56px 40px (date OFF: 1fr 78px 0px
+             40px). Name column now 90% of what it was, Vendor 95% (78 → 74px);
+             everything freed goes to Wig No. (last track = the rest). 30px =
+             the three 10px gaps. */
+          .mwd-row { grid-template-columns: calc((100% - 204px) * 0.9) 74px 56px minmax(40px, 1fr); }
           /* Date ON/OFF (2026-09-18, Hera): when the toggle is OFF, DemoRow/
              DemoRowHeader add this class and stop rendering the
              .mwd-date-mobile span's text — this rule is what actually
@@ -832,7 +865,7 @@ function ManagerWigDemo() {
              count in grid-template-columns stays at 4 either way (only the
              Date track's own width changes), so the number of gaps stays
              the same too — nothing needs to shift into a different track. */
-          .mwd-row.mwd-dateoff { grid-template-columns: 1fr 78px 0px 40px; }
+          .mwd-row.mwd-dateoff { grid-template-columns: calc((100% - 148px) * 0.9) 74px 0px minmax(40px, 1fr); }
           /* Name/Color/SKU stacking order (2026-09-18, Hera: "把目前 SKU 第
              一行，Name 第二行，color 第三行的顺序，改成 Name / Color / SKU",
              mobile-only) — .mwd-name-cell becomes a column flexbox only
@@ -864,6 +897,12 @@ function ManagerWigDemo() {
           .mwd-date-desktop { display: none; }
           .mwd-date-mobile { display: inline; }
           .mwd-wignum { text-align: right; }
+          /* Wig No. never cut off (2026-11-26, Hera): it wraps onto a second
+             line instead of "…" when it still doesn't fit. Overrides the
+             no-wrap/ellipsis it shared with .mwd-sku above. */
+          .mwd-wignum {
+            white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere;
+          }
           /* Date ON/OFF toggle button (2026-09-18, Hera): top-right corner
              of the "Current demos" card, mobile-only — hidden entirely on
              desktop/tablet by the base .mwd-date-toggle { display: none }
@@ -1115,6 +1154,22 @@ function ManagerWigDemo() {
       )}
 
       {showHelp && <HowToUseOverlay onClose={() => setShowHelp(false)} />}
+
+      {tapTip && createPortal(
+        <div style={{
+          position: 'fixed', zIndex: 99999,
+          left: Math.max(8, Math.min(tapTip.left, window.innerWidth - 8 - Math.min(320, window.innerWidth - 16))),
+          top: tapTip.top,
+          transform: tapTip.below ? 'none' : 'translateY(-100%)',
+          maxWidth: Math.min(320, window.innerWidth - 16),
+          background: 'white', border: '1px solid #e1e3e5', borderRadius: '8px',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.15)', padding: '8px 12px',
+          fontSize: '13px', color: '#202223', wordBreak: 'break-word', pointerEvents: 'none',
+        }}>
+          {tapTip.text}
+        </div>,
+        document.body
+      )}
     </Page>
   );
 }
