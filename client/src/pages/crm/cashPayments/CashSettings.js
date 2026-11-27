@@ -220,6 +220,62 @@ function AdminPinCard({ settings, onSaved }) {
   );
 }
 
+// Significant discrepancy thresholds (2026-11-27, Hera). A day is a
+// "Significant discrepancy" in Audit when a diff is at or above its amount
+// (either sign). Empty = that diff never counts as significant.
+const TH_FIELDS = [
+  { key: 'diff1', label: 'Expected ↔ StoreCounted', help: 'Each drawer, and the day total' },
+  { key: 'diff2', label: 'StoreCounted ↔ Counted', help: 'Day total' },
+  { key: 'diff3', label: 'Removed ↔ Receipted', help: 'Day total' },
+];
+const centsText = (c) => (c === null || c === undefined ? '' : (c / 100).toFixed(2));
+function ThresholdsCard({ settings, onSaved }) {
+  const t = settings.thresholds || {};
+  const [vals, setVals] = useState(() => Object.fromEntries(TH_FIELDS.map(f => [f.key, centsText(t[f.key])])));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [info, setInfo] = useState('');
+  const changed = TH_FIELDS.some(f => vals[f.key] !== centsText(t[f.key]));
+  const save = async () => {
+    setBusy(true); setError(''); setInfo('');
+    try {
+      await api('PUT', '/thresholds', vals);
+      await onSaved();
+      setInfo('Saved.');
+    } catch (e) { setError(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <Card>
+      <BlockStack gap="300">
+        <Text variant="headingMd" as="h2">Significant discrepancy threshold</Text>
+        <Text variant="bodySm" tone="subdued">
+          In Audit, a day is a Significant discrepancy when a difference reaches this amount (more or less). Leave empty to never count it.
+        </Text>
+        {error && <Banner tone="critical" onDismiss={() => setError('')}>{error}</Banner>}
+        {info && <Banner tone="success" onDismiss={() => setInfo('')}>{info}</Banner>}
+        <InlineStack gap="300" blockAlign="end" wrap>
+          {TH_FIELDS.map(f => (
+            <div key={f.key} style={{ width: 200 }}>
+              <TextField
+                label={f.label}
+                helpText={f.help}
+                prefix="$"
+                inputMode="decimal"
+                value={vals[f.key]}
+                onChange={(v) => { setVals(cur => ({ ...cur, [f.key]: v })); setInfo(''); }}
+                autoComplete="off"
+              />
+            </div>
+          ))}
+          <div style={{ paddingBottom: 22 }}>
+            <Button onClick={save} loading={busy} disabled={!changed || busy}>Save</Button>
+          </div>
+        </InlineStack>
+      </BlockStack>
+    </Card>
+  );
+}
+
 export default function CashSettings({ settings, isAdmin, allLocations, reloadSettings, logout }) {
   const [editing, setEditing] = useState(null); // null | 'new' | group
   const [error, setError] = useState('');
@@ -287,6 +343,8 @@ export default function CashSettings({ settings, isAdmin, allLocations, reloadSe
         </Card>
 
         <AdminPinCard settings={settings} onSaved={reloadSettings} />
+
+        <ThresholdsCard settings={settings} onSaved={reloadSettings} />
 
         <StartingDateCard settings={settings} onSaved={reloadSettings} />
       </BlockStack>

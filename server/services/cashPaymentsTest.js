@@ -80,14 +80,18 @@ function fakeDay(kind, drawers) {
   const lines = drawers.map((d) => {
     const sales = noCash || Math.random() < 0.15 ? 0 : round5(rnd(2000, 90000));
     const removed = !noCash && sales > 0 && Math.random() < 0.15 ? round5(rnd(200, 3000)) : 0;
-    return { ...d, opening: FLOAT, ending: FLOAT + sales - removed, removed };
+    // expectedCashAtClose (2026-11-27): usually what the store counted, ~10 % off a little.
+    const ending = FLOAT + sales - removed;
+    const expectedClose = sales > 0 && Math.random() < 0.1 ? ending + (Math.random() < 0.5 ? -1 : 1) * round5(rnd(5, 500)) : ending;
+    return { ...d, opening: FLOAT, ending, expectedClose, removed };
   });
   const expected = lines.reduce((a, l) => a + l.ending - l.opening, 0);
+  const posExpected = lines.reduce((a, l) => a + l.expectedClose - l.opening, 0);
   const removed = lines.reduce((a, l) => a + l.removed, 0);
   let counted = null;
   let receipted = null;
   let note = null;
-  if (kind === 'filled' && !(expected === 0 && removed === 0)) {
+  if (kind === 'filled') { // 2026-11-27: No cash days need Counted too (0)
     counted = expected;
     if (Math.random() < 0.25) {
       counted = Math.max(0, expected + (Math.random() < 0.5 ? -1 : 1) * round5(rnd(5, 900)));
@@ -99,22 +103,22 @@ function fakeDay(kind, drawers) {
       else if (r < 0.8) receipted = Math.max(0, removed - round5(rnd(100, 1000)));
     }
   }
-  return { lines, expected, removed, counted, receipted, note };
+  return { lines, expected, posExpected, removed, counted, receipted, note };
 }
 
 // Never overwrites a real row.
 async function insertDay(client, loc, day, f, depositId) {
   for (const l of f.lines) {
     await client.query(
-      `INSERT INTO cash_drawer_days (location, pay_date, drawer_id, drawer_name, opening_cents, ending_cents, removed_cents, sessions, is_test)
-       VALUES ($1, $2::date, $3, $4, $5, $6, $7, 1, TRUE) ON CONFLICT (location, pay_date, drawer_id) DO NOTHING`,
-      [loc, day, l.id, l.name, l.opening, l.ending, l.removed]
+      `INSERT INTO cash_drawer_days (location, pay_date, drawer_id, drawer_name, opening_cents, ending_cents, removed_cents, sessions, is_test, expected_close_cents)
+       VALUES ($1, $2::date, $3, $4, $5, $6, $7, 1, TRUE, $8) ON CONFLICT (location, pay_date, drawer_id) DO NOTHING`,
+      [loc, day, l.id, l.name, l.opening, l.ending, l.removed, l.expectedClose]
     );
   }
   await client.query(
-    `INSERT INTO cash_payments (location, pay_date, expected_cents, removed_cents, counted_cents, receipted_cents, note, deposit_id, is_test)
-     VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, TRUE) ON CONFLICT (location, pay_date) DO NOTHING`,
-    [loc, day, f.expected, f.removed, f.counted, f.receipted, f.note, depositId]
+    `INSERT INTO cash_payments (location, pay_date, expected_cents, removed_cents, counted_cents, receipted_cents, note, deposit_id, is_test, pos_expected_cents)
+     VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, TRUE, $9) ON CONFLICT (location, pay_date) DO NOTHING`,
+    [loc, day, f.expected, f.removed, f.counted, f.receipted, f.note, depositId, f.posExpected]
   );
 }
 

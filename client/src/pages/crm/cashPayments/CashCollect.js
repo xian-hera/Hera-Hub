@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Page, Card, BlockStack, InlineStack, Button, Banner, Text, Modal, TextField } from '@shopify/polaris';
-import { CollectTable, canDeposit } from './CashTable';
+import { canDeposit } from './CashTable';
+import { DayList } from './CashDays'; // day blocks, 2026-11-27
 import { api, SingleSelect, CollectDateRange, FilterPills, lastDays, currentVisit, isRangeReady, notReadyText, dateParts } from './cashShared';
 
 // Cash Payments › Collect (2026-11-19, Hera — claude/CASH_PAYMENTS_SPEC.md;
@@ -12,11 +13,15 @@ import { api, SingleSelect, CollectDateRange, FilterPills, lastDays, currentVisi
 // can't be ticked). Count pills = status filter (one at a time, default
 // Pending); the numbers only depend on location + date range. Oldest → newest.
 // (Before 2026-11-20: Declared / Counted vs System, and Save & Archive.)
+// 2026-11-27 (Hera): one block per day — each drawer's Expected (Shopify) and
+// StoreCounted, the day totals, Counted and Receipted typed by finance. Status
+// Pending / Collected / Deposited; pills All · Pending · Collected · Diffs ·
+// Deposited · Not deposited. Only Collected days can be ticked for a deposit.
 
 // Kept for the visit so going to Audit and back doesn't reset the filters.
 let memo = null; // { location, range, filter }
 
-const EMPTY_COUNTS = { all: 0, collected: 0, pending: 0, mismatch: 0, deposited: 0, notdeposited: 0 };
+const EMPTY_COUNTS = { all: 0, pending: 0, collected: 0, diffs: 0, deposited: 0, notdeposited: 0 };
 
 export default function CashCollect({ settings, locations }) {
   if (memo && memo.visit !== currentVisit()) memo = null; // new visit → default filters
@@ -149,9 +154,11 @@ export default function CashCollect({ settings, locations }) {
               {loading && rows.length === 0
                 ? <div style={{ padding: 16 }}><Text tone="subdued">Loading...</Text></div>
                 : (
-                  <CollectTable
+                  <DayList
                     rows={shown}
+                    mode="collect"
                     currentYear={Number(settings.today.slice(0, 4))}
+                    selectable={canDeposit}
                     selected={selected}
                     onSelect={setSelected}
                     onSaveAmount={saveAmount}
@@ -177,7 +184,7 @@ export default function CashCollect({ settings, locations }) {
             <Text>
               {`${toDeposit.length} day(s): ${toDeposit.map(r => dateParts(r.date).main).join(', ')}`}
             </Text>
-            <Text>{`Counted ${money(total('counted'))} · Expected ${money(total('expected'))} · Removed ${money(total('removed'))}`}</Text>
+            <Text>{`Counted ${money(total('counted'))} · StoreCounted ${money(total('storeCounted'))} · Removed ${money(total('removed'))}`}</Text>
             <TextField label="Deposit note (optional)" value={depositNote} onChange={setDepositNote} multiline={2} maxLength={1000} autoComplete="off" />
             <Text tone="critical">After the deposit, these days can no longer be changed. Notes can still be edited.</Text>
           </BlockStack>

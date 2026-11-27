@@ -77,6 +77,20 @@ async function ensureCashPaymentsTables(client) {
       is_test    BOOLEAN NOT NULL DEFAULT FALSE
     )
   `);
+  // ── Expected vs StoreCounted (2026-11-27, Hera) ────────────────────────────
+  // Per drawer, Shopify's expectedCashAtClose (what the system says should be
+  // in the drawer) next to the StoreCounted cashCountedAtClose (ending_cents).
+  //   cash_drawer_days.expected_close_cents  expectedCashAtClose (float included; NULL = not fetched)
+  //   cash_payments.pos_expected_cents       Σ drawers (expectedCashAtClose − cash at open)
+  //   cash_payments.expected_cents           keeps its meaning: Σ drawers (cashCountedAtClose − cash at open)
+  //                                          — shown as "StoreCounted" from 2026-11-27 on
+  //   cash_payments.reviewed_at              Audit › Discrepancy › Mark as reviewed (cleared when
+  //                                          Counted / Receipted change)
+  // Thresholds for "Significant discrepancy": app_settings 'cash_thresholds'
+  // { diff1, diff2, diff3 } in cents (null = not set).
+  await client.query(`ALTER TABLE cash_drawer_days ADD COLUMN IF NOT EXISTS expected_close_cents BIGINT`);
+  await client.query(`ALTER TABLE cash_payments ADD COLUMN IF NOT EXISTS pos_expected_cents BIGINT`);
+  await client.query(`ALTER TABLE cash_payments ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ`);
   await client.query(`
     CREATE TABLE IF NOT EXISTS cash_payment_days (
       pay_date   DATE PRIMARY KEY,

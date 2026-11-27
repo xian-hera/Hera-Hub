@@ -341,19 +341,26 @@ export const CalendarIcon = ({ color = 'currentColor' }) => (
 );
 
 // Count pills that are also the status filter (one at a time).
+// 2026-11-27 (Hera): All · Pending · Collected · Diffs · Deposited · Not deposited
+// (was: All · Collected · Pending · Mismatch · Deposited · Not deposited yet).
 export const PILLS = [
   { id: 'all', label: 'All' },
-  { id: 'collected', label: 'Collected' },
   { id: 'pending', label: 'Pending' },
-  { id: 'mismatch', label: 'Mismatch' },
-  // 2026-11-20: Archived → Deposited + Not deposited yet
+  { id: 'collected', label: 'Collected' },
+  { id: 'diffs', label: 'Diffs' },
   { id: 'deposited', label: 'Deposited' },
-  { id: 'notdeposited', label: 'Not deposited yet' },
+  { id: 'notdeposited', label: 'Not deposited' },
 ];
-export function FilterPills({ counts, value, onChange }) {
+// Audit › Discrepancy (2026-11-27).
+export const AUDIT_PILLS = [
+  { id: 'dall', label: 'All' },
+  { id: 'dsig', label: 'Significant discrepancy' },
+  { id: 'reviewed', label: 'Reviewed' },
+];
+export function FilterPills({ counts, value, onChange, pills = PILLS }) {
   return (
     <InlineStack gap="200" wrap blockAlign="center">
-      {PILLS.map(p => (
+      {pills.map(p => (
         <button key={p.id} type="button" onClick={() => onChange(p.id)} style={smallBtnStyle(value === p.id)}>
           <span>{p.label}</span>
           <span style={{ fontWeight: 650 }}>{counts ? counts[p.id] || 0 : 0}</span>

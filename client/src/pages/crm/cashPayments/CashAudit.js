@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Page, Card, BlockStack, InlineStack, Banner, Text, Popover, Button } from '@shopify/polaris';
 import MultiSelectDropdown from '../../../components/MultiSelectDropdown';
-import { DetailTable, DepositTable } from './CashTable';
+import { DayList, DepositCard } from './CashDays'; // 2026-11-27 layout
 import {
-  api, FilterPills, Pager, RangeCalendar, CalendarIcon, smallBtnStyle, lastDays, currentVisit, shortDate,
+  api, FilterPills, AUDIT_PILLS, Pager, RangeCalendar, CalendarIcon, smallBtnStyle, lastDays, currentVisit, shortDate,
   isRangeReady, notReadyText,
 } from './cashShared';
 
@@ -17,6 +17,18 @@ import {
 //     Removed. Count pills = status filter. 50 rows a page. Sorted by location
 //     (MTL, OTT, QC, EDM, CAL; numbers ascending), then the newest day first.
 // Amounts are read-only here; notes (day and deposit) can be edited.
+//
+// 2026-11-27 (Hera) — two sections under the filters:
+//   Discrepancy: the days with any diff ≠ 0 (diff1 Expected ↔ StoreCounted per
+//     drawer or total, diff2 StoreCounted ↔ Counted, diff3 Removed ↔ Receipted),
+//     as day blocks with the location. Pills All · Significant discrepancy
+//     (a diff at or above its Settings threshold) · Reviewed. Tick days →
+//     Mark as reviewed (they leave All / Significant; Reviewed can undo).
+//   Deposits: one card per deposit (newest first), closed / opened; the header
+//     shows the location, when it was made, its days, the Discrepancy pill
+//     (Σ Counted − Σ StoreCounted of the whole deposit, only when ≠ 0), Total
+//     StoreCounted and Total Counted. Opened: the deposit note and its days.
+// (Replaces the 2026-11-20 deposit table + detail list.)
 
 const PAGE_SIZE = 50;
 
@@ -56,7 +68,11 @@ export default function CashAudit({ settings, locations }) {
   const [selected, setSelected] = useState(() => (memo ? memo.selected.filter(l => locations.includes(l)) : locations));
   const [mode, setMode] = useState(() => (memo ? memo.mode : 'last30')); // 'last7' | 'last30' | 'custom'
   const [custom, setCustom] = useState(() => (memo ? memo.custom : null)); // { from, to }
-  const [filter, setFilter] = useState(() => (memo ? memo.filter : 'all'));
+  const [filter, setFilter] = useState(() => (memo && ['dall', 'dsig', 'reviewed'].includes(memo.filter) ? memo.filter : 'dall'));
+  const [picked, setPicked] = useState(() => new Set()); // days ticked for Mark as reviewed
+  const [reviewing, setReviewing] = useState(false);
+  const [openDeps, setOpenDeps] = useState(() => new Set()); // opened deposit cards
+  const [depRows, setDepRows] = useState({});                // deposit id → its days (loaded when opened)
   const [calendar, setCalendar] = useState(false);
   const [page, setPage] = useState(1);
   const [data, setData] = useState(null);
@@ -65,7 +81,7 @@ export default function CashAudit({ settings, locations }) {
   const [error, setError] = useState('');
 
   useEffect(() => { memo = { visit: currentVisit(), selected, mode, custom, filter }; }, [selected, mode, custom, filter]);
-  useEffect(() => { setPage(1); }, [selected, mode, custom, filter]);
+  useEffect(() => { setPage(1); setPicked(new Set()); }, [selected, mode, custom, filter]);
 
   let range = null;
   if (ready) {
@@ -80,19 +96,56 @@ export default function CashAudit({ settings, locations }) {
     try {
       const q = new URLSearchParams({
         locations: selected.join(','), from: range.from, to: range.to, filter, sort: 'desc',
-        page: String(page), pageSize: String(PAGE_SIZE), drawers: '1',
+        page: String(page), pageSize: String(PAGE_SIZE),
       });
       const dq = new URLSearchParams({ locations: selected.join(','), from: range.from, to: range.to });
       const [rows, deps] = await Promise.all([api('GET', `/rows?${q}`), api('GET', `/deposits?${dq}`)]);
       setData(rows);
       setDeposits(deps.deposits || []);
+      // The newest deposit opens by itself the first time.
+      setOpenDeps(cur => (cur.size === 0 && deps.deposits && deps.deposits[0] ? new Set([deps.deposits[0].id]) : cur));
+      setDepRows({});
     } catch (e) { setError(e.message); } finally { setLoading(false); }
   }, [ready, range && range.from, range && range.to, selected, filter, page]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [load]);
 
   const saveNote = async (row, note) => {
     const d = await api('PUT', '/note', { location: row.location, date: row.date, note });
-    setData(cur => cur && { ...cur, rows: cur.rows.map(r => (r.location === row.location && r.date === row.date ? { ...d.row, drawers: r.drawers } : r)) });
+    const same = (r) => r.location === row.location && r.date === row.date;
+    setData(cur => cur && { ...cur, rows: cur.rows.map(r => (same(r) ? d.row : r)) });
+    setDepRows(cur => {
+      const next = { ...cur };
+      Object.keys(next).forEach(k => { next[k] = next[k].map(r => (same(r) ? d.row : r)); });
+      return next;
+    });
+  };
+
+  // Deposit cards: the days are loaded the first time a card opens.
+  const loadDepositRows = useCallback(async (id) => {
+    try {
+      const d = await api('GET', `/deposits/${id}/rows`);
+      setDepRows(cur => ({ ...cur, [id]: d.rows || [] }));
+    } catch (e) { setError(e.message); }
+  }, []);
+  useEffect(() => {
+    openDeps.forEach(id => { if (!depRows[id]) loadDepositRows(id); });
+  }, [openDeps, depRows, loadDepositRows]);
+  const toggleDeposit = (id) => setOpenDeps(cur => {
+    const next = new Set(cur);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
+  // Mark as reviewed (or, on the Reviewed pill, take it back).
+  const review = async () => {
+    const items = ((data && data.rows) || []).filter(r => picked.has(`${r.location}|${r.date}`)).map(r => ({ location: r.location, date: r.date }));
+    if (!items.length) return;
+    setReviewing(true); setError('');
+    try {
+      await api('POST', '/review', { items, reviewed: filter !== 'reviewed' });
+      setPicked(new Set());
+      await load();
+    } catch (e) { setError(e.message); } finally { setReviewing(false); }
   };
   const saveDepositNote = async (dep, note) => {
     await api('PUT', `/deposits/${dep.id}/note`, { note });
@@ -150,46 +203,57 @@ export default function CashAudit({ settings, locations }) {
           </InlineStack>
         </Card>
 
-        {/* Deposit card (2026-11-20) */}
+        {/* Discrepancy (2026-11-27) */}
+        <div style={{ padding: '8px 0 0' }}><Text variant="headingMd" as="h2">Discrepancy</Text></div>
+        <InlineStack align="space-between" blockAlign="center" gap="300" wrap>
+          <FilterPills pills={AUDIT_PILLS} counts={data && data.counts} value={filter} onChange={setFilter} />
+          <InlineStack gap="300" blockAlign="center">
+            {data && <Pager page={data.page} pages={data.pages} onChange={setPage} />}
+            <Button variant="primary" onClick={review} loading={reviewing} disabled={picked.size === 0 || reviewing}>
+              {filter === 'reviewed' ? 'Mark as not reviewed' : 'Mark as reviewed'}
+            </Button>
+          </InlineStack>
+        </InlineStack>
         <Card padding="0">
-          <BlockStack gap="200">
-            <div style={{ padding: '16px 16px 0' }}>
-              <Text variant="headingSm" as="h2">Deposits</Text>
+          {!data && loading
+            ? <div style={{ padding: 16 }}><Text tone="subdued">Loading...</Text></div>
+            : (
+              <DayList
+                rows={(data && data.rows) || []}
+                mode="audit"
+                currentYear={year}
+                selectable={() => true}
+                selected={picked}
+                onSelect={setPicked}
+                onSaveNote={saveNote}
+                emptyText={selected.length === 0 ? 'Choose at least one location.' : (filter === 'reviewed' ? 'No reviewed days in this range.' : 'No discrepancy in this range.')}
+              />
+            )}
+          {data && data.pages > 1 && (
+            <div style={{ padding: '8px 16px 16px' }}>
+              <InlineStack align="center"><Pager page={data.page} pages={data.pages} onChange={setPage} /></InlineStack>
             </div>
-            {!deposits && loading
-              ? <div style={{ padding: 16 }}><Text tone="subdued">Loading...</Text></div>
-              : <DepositTable deposits={deposits || []} onSaveNote={saveDepositNote} emptyText="No deposits in this range." />}
-            <div style={{ height: 8 }} />
-          </BlockStack>
+          )}
+          <div style={{ height: 8 }} />
         </Card>
 
-        {/* Detail list */}
-        <Card padding="0">
-          <BlockStack gap="200">
-            <div style={{ padding: '16px 16px 4px' }}>
-              <InlineStack align="space-between" blockAlign="center" gap="300" wrap>
-                <FilterPills counts={data && data.counts} value={filter} onChange={setFilter} />
-                {data && <Pager page={data.page} pages={data.pages} onChange={setPage} />}
-              </InlineStack>
-            </div>
-            {!data && loading
-              ? <div style={{ padding: 16 }}><Text tone="subdued">Loading...</Text></div>
-              : (
-                <DetailTable
-                  rows={(data && data.rows) || []}
-                  currentYear={year}
-                  onSaveNote={saveNote}
-                  emptyText={selected.length === 0 ? 'Choose at least one location.' : 'Nothing in this range.'}
-                />
-              )}
-            {data && data.pages > 1 && (
-              <div style={{ padding: '8px 16px 16px' }}>
-                <InlineStack align="center"><Pager page={data.page} pages={data.pages} onChange={setPage} /></InlineStack>
-              </div>
-            )}
-            <div style={{ height: 8 }} />
-          </BlockStack>
-        </Card>
+        {/* Deposits (2026-11-27) */}
+        <div style={{ padding: '8px 0 0' }}><Text variant="headingMd" as="h2">Deposits</Text></div>
+        {!deposits && loading && <Text tone="subdued">Loading...</Text>}
+        {deposits && deposits.length === 0 && <Card><Text tone="subdued">No deposits in this range.</Text></Card>}
+        {(deposits || []).map(d => (
+          <DepositCard
+            key={d.id}
+            deposit={d}
+            currentYear={year}
+            open={openDeps.has(d.id)}
+            onToggle={() => toggleDeposit(d.id)}
+            rows={depRows[d.id]}
+            loading={openDeps.has(d.id) && !depRows[d.id]}
+            onSaveNote={saveNote}
+            onSaveDepositNote={saveDepositNote}
+          />
+        ))}
       </BlockStack>
     </Page>
   );

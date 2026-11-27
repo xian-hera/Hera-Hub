@@ -18,7 +18,10 @@
 //   PUT    /groups/my           { groupId, pin? } — Admin needs the Admin password
 //   DELETE /groups/my           Log out: forget this account's group
 //   PUT    /admin-pin           { pin } — set / change the Admin password
-//   GET    /rows                ?locations=A,B&from&to&filter&sort&page&pageSize&drawers=1
+//   GET    /rows                ?locations=A,B&from&to&filter&sort&page&pageSize (rows carry their drawers)
+//   POST   /review              { items: [{ location, date }], reviewed } — Audit › Discrepancy (2026-11-27)
+//   GET    /thresholds · PUT /thresholds { diff1, diff2, diff3 } — Significant discrepancy (2026-11-27)
+//   GET    /deposits/:id/rows   the days of one deposit (Audit › Deposits, expanded) (2026-11-27)
 //   PUT    /row                 { location, date, counted?, receipted? } (amount strings / null)
 //   PUT    /note                { location, date, note } ('' = delete)
 //   POST   /deposits            { location, dates: [...], note? } — Make Deposit
@@ -89,60 +92,137 @@ function parseAmount(v) {
   return cents;
 }
 
-// Row → what the page needs (2026-11-20, drawer-based — Hera):
-//   expected  Σ drawers (Ending − cash at open)    removed  Σ cash removed
-//   diff         = Counted − Expected
-//   removedDiff  = Receipted removed − Removed (only when Receipted is entered;
-//                  empty Receipted means Removed is fine)
-// Status:
-//   deposited  in a deposit (Make Deposit) — shown instead of the others
-//   nocash     Expected 0 and Removed 0 → grey row, nothing to enter
-//   pending    Counted missing
-//   matched    diff 0 and removedDiff 0 / empty
-//   mismatch   otherwise
-// Filter pills (one day = one row, drawers not counted separately):
-// Collected = Counted entered; Pending; Mismatch = entered with a difference
-// (deposited included); Deposited; Not deposited yet = not in a deposit.
+// Row → what the page needs. 2026-11-27 (Hera) layout — per drawer and per day:
+//   Expected      Shopify's expectedCashAtClose − cash at open   (pos_expected_cents; null = unknown)
+//   StoreCounted  cashCountedAtClose − cash at open               (expected_cents — old name kept)
+//   Counted       entered by finance (day total only)
+//   Removed       cash removed; Receipted = removed cash backed by receipts (entered, day total only)
+//   diff1 = StoreCounted − Expected   (each drawer, and the day total)
+//   diff2 = Counted − StoreCounted    (day total, once Counted is entered)
+//   diff3 = Receipted − Removed       (day total, once Receipted is entered)
+// Status (2026-11-27): deposited · collected (Counted entered) · pending.
+// (2026-11-20 version: Expected = Σ (Ending − open), Diff = Counted − Expected,
+//  statuses matched / mismatch / nocash — replaced.)
+// Flags (filter pills / counts):
+//   Collect: all · pending · collected · diffs (any diff ≠ 0) · deposited · notdeposited
+//   Audit › Discrepancy: dall (diffs, not reviewed) · dsig (significant, not reviewed) · reviewed (diffs, reviewed)
+// significant = a diff at or above its threshold (Settings; a threshold not set never counts).
 const num = (v) => (v === null || v === undefined ? null : Number(v));
-function shapeRow(r) {
-  const expected = Number(r.expected_cents || 0);
+const nz = (v) => v !== null && v !== undefined && v !== 0;
+function drawerKey(n) { const m = /^(\d+)$/.exec(n); return m ? [0, Number(m[1]), n] : [1, 0, n]; }
+function shapeDrawer(x) {
+  const opening = num(x.opening_cents) || 0;
+  const expectedClose = num(x.expected_close_cents);
+  const ending = num(x.ending_cents);
+  const expected = expectedClose === null ? null : expectedClose - opening;
+  const storeCounted = ending === null ? null : ending - opening;
+  return {
+    id: x.drawer_id,
+    name: x.drawer_name,
+    opening,
+    expected,
+    storeCounted,
+    diff1: expected === null || storeCounted === null ? null : storeCounted - expected,
+    removed: num(x.removed_cents) || 0,
+  };
+}
+function sortDrawers(list) {
+  return list.sort((a, b) => {
+    const ka = drawerKey(String(a.name)); const kb = drawerKey(String(b.name));
+    return ka[0] - kb[0] || ka[1] - kb[1] || String(ka[2]).localeCompare(String(kb[2]));
+  });
+}
+function shapeRow(r, drawers = [], thresholds = {}) {
+  const expected = num(r.pos_expected_cents);
+  const storeCounted = Number(r.expected_cents || 0);
   const removed = Number(r.removed_cents || 0);
   const counted = num(r.counted_cents);
   const receipted = num(r.receipted_cents);
-  const diff = counted === null ? null : counted - expected;
-  const removedDiff = receipted === null ? null : receipted - removed;
-  const noCash = expected === 0 && removed === 0;
-  const collected = counted !== null;
-  const mismatch = collected && (diff !== 0 || (removedDiff !== null && removedDiff !== 0));
+  const diff1 = expected === null ? null : storeCounted - expected;
+  const diff2 = counted === null ? null : counted - storeCounted;
+  const diff3 = receipted === null ? null : receipted - removed;
   const deposited = r.deposit_id !== null && r.deposit_id !== undefined;
-  const pending = !deposited && !noCash && !collected;
-  let status = 'pending';
-  if (deposited) status = 'deposited';
-  else if (noCash && !collected) status = 'nocash';
-  else if (collected) status = mismatch ? 'mismatch' : 'matched';
+  const collected = counted !== null;
+  const status = deposited ? 'deposited' : (collected ? 'collected' : 'pending');
+  const diffs = nz(diff1) || nz(diff2) || nz(diff3) || drawers.some(d => nz(d.diff1));
+  const over = (v, t) => nz(v) && t !== null && t !== undefined && Math.abs(v) >= t;
+  const significant = over(diff1, thresholds.diff1) || drawers.some(d => over(d.diff1, thresholds.diff1))
+    || over(diff2, thresholds.diff2) || over(diff3, thresholds.diff3);
+  const reviewed = !!r.reviewed_at;
   return {
     location: r.location,
     date: r.d,
     expected,
-    removed,
+    storeCounted,
     counted,
+    removed,
     receipted,
-    diff,
-    removedDiff,
+    diff1,
+    diff2,
+    diff3,
+    drawers,
     note: r.note || '',
     depositId: deposited ? Number(r.deposit_id) : null,
     depositedAt: r.deposited_at || null,
     deposit: r.deposit_title || null,
-    noCash,
     status,
-    flags: { collected, pending, mismatch, deposited, notdeposited: !deposited },
+    significant,
+    reviewed,
+    reviewedAt: r.reviewed_at || null,
+    flags: {
+      pending: status === 'pending',
+      collected: status === 'collected',
+      diffs,
+      deposited,
+      notdeposited: !deposited,
+      dall: diffs && !reviewed,
+      dsig: diffs && significant && !reviewed,
+      reviewed: diffs && reviewed,
+    },
   };
+}
+
+// Significant discrepancy thresholds (cents; null = not set).
+async function readThresholds(db = pool) {
+  const r = await db.query(`SELECT value FROM app_settings WHERE key = 'cash_thresholds'`);
+  const v = (r.rows[0] && r.rows[0].value) || {};
+  const one = (x) => (x === null || x === undefined || x === '' || !Number.isFinite(Number(x)) ? null : Number(x));
+  return { diff1: one(v.diff1), diff2: one(v.diff2), diff3: one(v.diff3) };
+}
+
+// Drawer lines of the given location / day pairs → Map 'LOC|YYYY-MM-DD' → [drawer].
+async function loadDrawers(locations, from, to, db = pool) {
+  const by = new Map();
+  if (!locations.length) return by;
+  const d = await db.query(
+    `SELECT location, to_char(pay_date, 'YYYY-MM-DD') AS d, drawer_id, drawer_name, opening_cents, ending_cents,
+            removed_cents, expected_close_cents
+       FROM cash_drawer_days WHERE location = ANY($1::text[]) AND pay_date BETWEEN $2::date AND $3::date`,
+    [locations, from, to]
+  );
+  for (const x of d.rows) {
+    const k = `${x.location}|${x.d}`;
+    if (!by.has(k)) by.set(k, []);
+    by.get(k).push(shapeDrawer(x));
+  }
+  for (const list of by.values()) sortDrawers(list);
+  return by;
+}
+
+// DB rows → shaped rows with their drawers.
+async function shapeRows(dbRows, db = pool) {
+  if (!dbRows.length) return [];
+  const thresholds = await readThresholds(db);
+  const locs = Array.from(new Set(dbRows.map(x => x.location)));
+  const days = dbRows.map(x => x.d).sort();
+  const drawers = await loadDrawers(locs, days[0], days[days.length - 1], db);
+  return dbRows.map(x => shapeRow(x, drawers.get(`${x.location}|${x.d}`) || [], thresholds));
 }
 
 // Deposit title: base + "-A", "-B"… when the base is used more than once in a year.
 const depositTitle = (d) => (d.suffix ? `${d.title_base}-${d.suffix}` : d.title_base);
 const ROW_SELECT = `SELECT p.location, to_char(p.pay_date, 'YYYY-MM-DD') AS d, p.expected_cents, p.removed_cents,
-         p.counted_cents, p.receipted_cents, p.note, p.deposit_id,
+         p.counted_cents, p.receipted_cents, p.note, p.deposit_id, p.pos_expected_cents, p.reviewed_at,
          d.created_at AS deposited_at, CASE WHEN d.id IS NULL THEN NULL
            WHEN d.suffix IS NULL THEN d.title_base ELSE d.title_base || '-' || d.suffix END AS deposit_title
     FROM cash_payments p LEFT JOIN cash_deposits d ON d.id = p.deposit_id`;
@@ -182,6 +262,7 @@ router.get('/settings', async (req, res) => {
       fetching: CP.isSyncRunning(),
       groups: await readGroups(),
       adminPinSet: !!(await readAdminPin()),
+      thresholds: await readThresholds(), // Significant discrepancy (2026-11-27)
     });
   } catch (e) {
     console.error('GET /api/cash-payments/settings error:', e);
@@ -382,8 +463,9 @@ router.delete('/groups/:id', async (req, res) => {
 
 // ─── rows ───────────────────────────────────────────────────────────────────
 
-const FILTERS = ['all', 'collected', 'pending', 'mismatch', 'deposited', 'notdeposited'];
-const EMPTY_COUNTS = { all: 0, collected: 0, pending: 0, mismatch: 0, deposited: 0, notdeposited: 0 };
+// 2026-11-27: mismatch → diffs; Audit › Discrepancy uses dall / dsig / reviewed.
+const FILTERS = ['all', 'collected', 'pending', 'diffs', 'deposited', 'notdeposited', 'dall', 'dsig', 'reviewed'];
+const EMPTY_COUNTS = { all: 0, collected: 0, pending: 0, diffs: 0, deposited: 0, notdeposited: 0, dall: 0, dsig: 0, reviewed: 0 };
 
 router.get('/rows', async (req, res) => {
   try {
@@ -399,7 +481,7 @@ router.get('/rows', async (req, res) => {
       `${ROW_SELECT} WHERE p.location = ANY($1::text[]) AND p.pay_date BETWEEN $2::date AND $3::date`,
       [locations, range.from, range.to]
     );
-    const all = r.rows.map(shapeRow);
+    const all = await shapeRows(r.rows);
     const counts = { ...EMPTY_COUNTS };
     for (const x of all) {
       counts.all += 1;
@@ -420,27 +502,7 @@ router.get('/rows', async (req, res) => {
     const page = Math.min(pages, Math.max(1, parseInt(req.query.page, 10) || 1));
     if (pageSize) list = list.slice((page - 1) * pageSize, page * pageSize);
 
-    // Per-drawer lines (Audit detail list): drawer, Ending, Removed.
-    if (req.query.drawers === '1' && list.length) {
-      const d = await pool.query(
-        `SELECT location, to_char(pay_date, 'YYYY-MM-DD') AS d, drawer_id, drawer_name, opening_cents, ending_cents, removed_cents
-           FROM cash_drawer_days WHERE location = ANY($1::text[]) AND pay_date BETWEEN $2::date AND $3::date`,
-        [Array.from(new Set(list.map(x => x.location))), range.from, range.to]
-      );
-      const by = new Map();
-      for (const x of d.rows) {
-        const k = `${x.location}|${x.d}`;
-        if (!by.has(k)) by.set(k, []);
-        by.get(k).push({ id: x.drawer_id, name: x.drawer_name, opening: num(x.opening_cents), ending: num(x.ending_cents), removed: num(x.removed_cents) });
-      }
-      const drawerKey = (n) => { const m = /^(\d+)$/.exec(n); return m ? [0, Number(m[1]), n] : [1, 0, n]; };
-      for (const x of list) {
-        x.drawers = (by.get(`${x.location}|${x.date}`) || []).sort((a, b) => {
-          const ka = drawerKey(String(a.name)); const kb = drawerKey(String(b.name));
-          return ka[0] - kb[0] || ka[1] - kb[1] || String(ka[2]).localeCompare(String(kb[2]));
-        });
-      }
-    }
+    // Every row carries its drawers (2026-11-27; was ?drawers=1, Audit only).
 
     res.json({ counts, rows: list, total, page, pages, startingDate: start, today, yesterday, range, fetching: CP.isSyncRunning(), testMode: rangeCtx.test.on });
   } catch (e) {
@@ -478,12 +540,13 @@ router.put('/row', async (req, res) => {
     }
     if (sets.length) {
       await pool.query(
-        `UPDATE cash_payments SET ${sets.join(', ')}, updated_at = NOW()
+        // A changed amount needs a new review (2026-11-27).
+        `UPDATE cash_payments SET ${sets.join(', ')}, reviewed_at = NULL, updated_at = NOW()
           WHERE location = $1 AND pay_date = $2::date AND deposit_id IS NULL`,
         params
       );
     }
-    res.json({ row: shapeRow(await loadRow(location, date)) });
+    res.json({ row: (await shapeRows([await loadRow(location, date)]))[0] });
   } catch (e) {
     console.error('PUT /api/cash-payments/row error:', e);
     res.status(500).json({ error: e.message });
@@ -502,7 +565,7 @@ router.put('/note', async (req, res) => {
       [location, date, note || null]
     );
     if (!r.rowCount) return res.status(404).json({ error: 'Row not found.' });
-    res.json({ row: shapeRow(await loadRow(location, date)) });
+    res.json({ row: (await shapeRows([await loadRow(location, date)]))[0] });
   } catch (e) {
     console.error('PUT /api/cash-payments/note error:', e);
     res.status(500).json({ error: e.message });
@@ -534,7 +597,8 @@ router.post('/deposits', async (req, res) => {
     if (r.rows.length !== dates.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Some days were not found.' }); }
     const bad = r.rows.filter(x => x.deposit_id !== null);
     if (bad.length) { await client.query('ROLLBACK'); return res.status(409).json({ error: `Already deposited: ${bad.map(x => x.d).join(', ')}.` }); }
-    const pending = r.rows.filter(x => x.counted_cents === null && !(Number(x.expected_cents) === 0 && Number(x.removed_cents) === 0));
+    // 2026-11-27: every day needs Counted (No cash days are no longer special).
+    const pending = r.rows.filter(x => x.counted_cents === null);
     if (pending.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: `Pending days can’t be deposited: ${pending.map(x => x.d).join(', ')}.` }); }
     const dep = await createDeposit(client, location, note, { isTest: r.rows.every(x => x.is_test) });
     await client.query(
@@ -568,7 +632,9 @@ router.get('/deposits', async (req, res) => {
               COALESCE(SUM(p.removed_cents), 0)::bigint AS removed,
               COALESCE(SUM(CASE WHEN p.receipted_cents IS NULL THEN 0 ELSE p.receipted_cents - p.removed_cents END), 0)::bigint AS removed_diff,
               COALESCE(SUM(p.receipted_cents), 0)::bigint AS receipted,
-              COUNT(p.receipted_cents)::int AS receipted_days
+              COUNT(p.receipted_cents)::int AS receipted_days,
+              COALESCE(SUM(p.pos_expected_cents), 0)::bigint AS pos_expected,
+              COUNT(p.pos_expected_cents)::int AS pos_expected_days
          FROM cash_deposits d JOIN cash_payments p ON p.deposit_id = d.id
         WHERE d.location = ANY($1::text[])
           AND d.id IN (SELECT deposit_id FROM cash_payments
@@ -599,8 +665,13 @@ router.get('/deposits', async (req, res) => {
         createdAt: d.created_at,
         days: d.days,
         dates: daysOf.get(d.id) || [],
-        expected: Number(d.expected),
+        expected: Number(d.expected), // Σ StoreCounted (old name)
+        storeCounted: Number(d.expected),
+        // Σ Expected (expectedCashAtClose − open); null when no day has it (2026-11-27)
+        posExpected: d.pos_expected_days ? Number(d.pos_expected) : null,
         counted: Number(d.counted),
+        // Discrepancy pill: Σ Counted − Σ StoreCounted of the whole deposit (2026-11-27)
+        discrepancy: Number(d.counted) - Number(d.expected),
         removed: Number(d.removed),
         removedDiff: Number(d.removed_diff),
         // Σ Receipted removed entered (null when no day has one) — 2026-11-20
@@ -610,6 +681,63 @@ router.get('/deposits', async (req, res) => {
     });
   } catch (e) {
     console.error('GET /api/cash-payments/deposits error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// The days of one deposit, oldest first, with their drawers (2026-11-27 —
+// Audit › Deposits, a card opened).
+router.get('/deposits/:id/rows', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const r = await pool.query(`${ROW_SELECT} WHERE p.deposit_id = $1 ORDER BY p.pay_date`, [id]);
+    res.json({ rows: await shapeRows(r.rows) });
+  } catch (e) {
+    console.error('GET /api/cash-payments/deposits/:id/rows error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Audit › Discrepancy › Mark as reviewed (2026-11-27). reviewed false = undo.
+router.post('/review', async (req, res) => {
+  try {
+    const items = Array.isArray(req.body && req.body.items) ? req.body.items : [];
+    const on = !(req.body && req.body.reviewed === false);
+    const clean = items.filter(x => x && x.location && CP.isIsoDate(x.date));
+    if (!clean.length) return res.status(400).json({ error: 'Select at least one day.' });
+    let n = 0;
+    for (const x of clean) {
+      const u = await pool.query(
+        `UPDATE cash_payments SET reviewed_at = ${on ? 'NOW()' : 'NULL'} WHERE location = $1 AND pay_date = $2::date`,
+        [x.location, x.date]
+      );
+      n += u.rowCount;
+    }
+    res.json({ updated: n });
+  } catch (e) {
+    console.error('POST /api/cash-payments/review error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Significant discrepancy thresholds (2026-11-27). Amount strings, '' = not set.
+router.get('/thresholds', async (req, res) => {
+  try { res.json(await readThresholds()); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+router.put('/thresholds', async (req, res) => {
+  try {
+    const out = {};
+    for (const k of ['diff1', 'diff2', 'diff3']) {
+      try { out[k] = parseAmount(req.body ? req.body[k] : null); } catch (e) { return res.status(400).json({ error: e.message }); }
+    }
+    await pool.query(
+      `INSERT INTO app_settings (key, value, updated_at) VALUES ('cash_thresholds', $1::jsonb, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = $1::jsonb, updated_at = NOW()`,
+      [JSON.stringify(out)]
+    );
+    res.json(out);
+  } catch (e) {
+    console.error('PUT /api/cash-payments/thresholds error:', e);
     res.status(500).json({ error: e.message });
   }
 });

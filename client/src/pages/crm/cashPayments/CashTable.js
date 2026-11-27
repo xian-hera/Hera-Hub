@@ -4,6 +4,10 @@ import { LocPill } from '../../warehouse/whShared';
 import { fmtMoney, fmtDiff, parseMoney, dateParts, depositStamp, depositDay, SUBDUED, GREEN, RED } from './cashShared';
 
 // Cash Payments tables (2026-11-19, Hera; drawer-based since 2026-11-20).
+// 2026-11-27 (Hera): Collect and Audit now use the day blocks in CashDays.js
+// (Expected / StoreCounted / Counted per drawer). CollectTable, DetailTable and
+// DepositTable below are no longer used by the pages; the small parts (Fit,
+// Amt, DiffText, AmountInput, NoteModal, useRowNotes…) are shared with CashDays.js.
 //
 //   CollectTable  ☐ | Date | Expected | Removed | Diff. | Counted | Receipted removed | Removed diff. | Status | Note
 //   DetailTable   Location | Date | Drawer · Ending · Removed (one line per drawer) | Total Ending |
@@ -35,7 +39,7 @@ function Head({ children, pill, tip }) {
 // Fit (2026-11-20, Hera): a value wider than its column is cut with "…"
 // (column widths never change); hovering it shows the whole value. No
 // tooltip when it fits.
-function Fit({ text, style }) {
+export function Fit({ text, style }) {
   const ref = useRef(null);
   const [cut, setCut] = useState(false);
   useLayoutEffect(() => {
@@ -55,7 +59,7 @@ function Fit({ text, style }) {
   return cut ? <Tooltip content={text} preferredPosition="above">{span}</Tooltip> : span;
 }
 
-function DiffText({ cents, dim }) {
+export function DiffText({ cents, dim }) {
   const t = fmtDiff(cents);
   if (!t) return null;
   return <Fit text={t} style={{ ...NUM, color: dim ? '#8a8a8a' : (cents > 0 ? GREEN : RED) }} />;
@@ -100,7 +104,7 @@ function focusNext(current) {
   if (i >= 0 && all[i + 1]) { all[i + 1].focus(); all[i + 1].select(); } else current.blur();
 }
 
-function AmountInput({ cents, onCommit, label, width = 92 }) {
+export function AmountInput({ cents, onCommit, label, width = 92 }) {
   const [text, setText] = useState(fmtMoney(cents));
   const [bad, setBad] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -138,7 +142,7 @@ function AmountInput({ cents, onCommit, label, width = 92 }) {
   );
 }
 
-const linkBtn = (color) => ({ border: 'none', background: 'none', padding: 0, cursor: 'pointer', font: 'inherit', fontSize: 13, color });
+export const linkBtn = (color) => ({ border: 'none', background: 'none', padding: 0, cursor: 'pointer', font: 'inherit', fontSize: 13, color });
 
 // One line, cut with "…"; the whole note in a tooltip on hover.
 export function NoteCell({ note, onEdit, onDelete }) {
@@ -194,7 +198,7 @@ export function NoteModal({ target, onClose, onSave }) {
 }
 
 // Day-row notes: modal + delete, shared by Collect and the detail list.
-function useRowNotes(onSaveNote) {
+export function useRowNotes(onSaveNote) {
   const [noteRow, setNoteRow] = useState(null);
   const del = async (row) => {
     if (!window.confirm('Delete this note?')) return;
@@ -210,7 +214,7 @@ function useRowNotes(onSaveNote) {
   return { edit: setNoteRow, del, modal };
 }
 
-const Checkbox = ({ checked, disabled, indeterminate, onChange, label }) => (
+export const Checkbox = ({ checked, disabled, indeterminate, onChange, label }) => (
   <input
     type="checkbox"
     aria-label={label}
@@ -223,6 +227,7 @@ const Checkbox = ({ checked, disabled, indeterminate, onChange, label }) => (
 );
 
 // A day can go into a deposit when it isn't deposited and isn't Pending.
+// 2026-11-27: Collected days only (Counted entered, not deposited).
 export const canDeposit = (row) => !row.depositId && row.status !== 'pending';
 const rowKey = (r) => `${r.location}|${r.date}`;
 
@@ -313,7 +318,7 @@ export function CollectTable({ rows, currentYear, selected, onSelect, onSaveAmou
 // ─── Audit: shared bits (2026-11-20 layout, Hera) ────────────────────────────
 // Amount shown in the Audit tables: null → nothing, 0 → "-" (no pill),
 // otherwise the amount (in a pill when asked, bold when entered by finance).
-function Amt({ cents, pill, bold }) {
+export function Amt({ cents, pill, bold }) {
   if (cents === null || cents === undefined) return null;
   if (cents === 0) return <span style={{ color: '#8a8a8a' }}>-</span>;
   const style = { ...(pill ? VAL_PILL : NUM), ...(bold ? ENTERED : null) };

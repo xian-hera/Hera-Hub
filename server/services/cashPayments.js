@@ -22,6 +22,14 @@
 // (Before 2026-11-20 this file fetched System = ShopifyQL cash net payments per
 // location; Hera chose to drop System completely. The columns stay, unused.)
 //
+// 2026-11-27 (Hera): per drawer also Shopify's expectedCashAtClose (what the
+// system says should be in the drawer). Shown as "Expected"; the counted
+// cashCountedAtClose is shown as "StoreCounted". Per location per day:
+//   pos_expected_cents = Σ drawers (expectedCashAtClose − cash at open)
+//   expected_cents     = Σ drawers (cashCountedAtClose − cash at open)  (= StoreCounted)
+// Days fetched before this change are fetched once more to fill it in
+// (deposited days only get the new column; their amounts don't change).
+//
 // When: every day at 03:10 Toronto (jobs/cashPaymentsScheduler.js), shortly
 // after boot, and right after a Starting date is saved. Each run fetches every
 // day from the Starting date to yesterday not fetched yet (cash_payment_days).
@@ -99,6 +107,7 @@ const SESSIONS = `query CashSessions($q: String!, $after: String) {
       cashCountedAtOpen { amount }
       cashCountedAtClose { amount }
       closingBalance { amount }
+      expectedCashAtClose { amount }
       cashActivities(first: 30) {
         pageInfo { hasNextPage endCursor }
         nodes { __typename time cash { amount } ... on CashAdjustmentActivity { type } }
@@ -184,9 +193,12 @@ function groupSessions(sessions) {
     const locs = byDay.get(day);
     if (!locs.has(loc)) locs.set(loc, new Map());
     const drawers = locs.get(loc);
-    const cur = drawers.get(drawer.id) || { name: drawer.name || drawer.id, opening: 0, ending: 0, removed: 0, sessions: 0 };
+    const cur = drawers.get(drawer.id) || { name: drawer.name || drawer.id, opening: 0, ending: 0, expectedClose: 0, removed: 0, sessions: 0 };
     cur.opening += money(s.cashCountedAtOpen) || 0;
     cur.ending += ending;
+    // expectedCashAtClose (2026-11-27); one session without it → unknown for the drawer
+    const exp = money(s.expectedCashAtClose);
+    cur.expectedClose = exp === null || cur.expectedClose === null ? null : cur.expectedClose + exp;
     cur.removed += removedOf(s.activities);
     cur.sessions += 1;
     drawers.set(drawer.id, cur);
@@ -206,9 +218,23 @@ async function syncOnce() {
     [start, yesterday]
   );
   const have = new Set(done.rows.map(r => r.d));
+  // One-time backfill (2026-11-27): days fetched before expectedCashAtClose
+  // was kept are fetched once more.
+  const backfillDone = await pool.query(`SELECT 1 FROM app_settings WHERE key = 'cash_expected_backfill'`);
+  if (!backfillDone.rows.length) {
+    const old = await pool.query(
+      `SELECT DISTINCT to_char(pay_date, 'YYYY-MM-DD') AS d FROM cash_payments
+        WHERE is_test = FALSE AND pos_expected_cents IS NULL AND pay_date BETWEEN $1::date AND $2::date`,
+      [start, yesterday]
+    );
+    old.rows.forEach(r => have.delete(r.d));
+  }
   const missing = [];
   for (let d = start; d <= yesterday; d = addDays(d, 1)) if (!have.has(d)) missing.push(d);
-  if (!missing.length) return { fetchedDays: 0 };
+  const markBackfill = () => pool.query(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES ('cash_expected_backfill', 'true'::jsonb, NOW()) ON CONFLICT (key) DO NOTHING`
+  ).catch(() => {});
+  if (!missing.length) { if (!backfillDone.rows.length) await markBackfill(); return { fetchedDays: 0 }; }
 
   const locations = await activeLocations();
   let fetchedDays = 0;
@@ -224,27 +250,33 @@ async function syncOnce() {
         const locs = byDay.get(day) || new Map();
         for (const loc of locations) {
           const drawers = locs.get(loc) || new Map();
-          let expected = 0;
+          let expected = 0;   // = StoreCounted (cashCountedAtClose − open)
+          let posExpected = 0; // Expected (expectedCashAtClose − open), null if a drawer lacks it
           let removed = 0;
           for (const [drawerId, d] of drawers) {
             expected += d.ending - d.opening;
+            posExpected = posExpected === null || d.expectedClose === null ? null : posExpected + d.expectedClose - d.opening;
             removed += d.removed;
             await client.query(
-              `INSERT INTO cash_drawer_days (location, pay_date, drawer_id, drawer_name, opening_cents, ending_cents, removed_cents, sessions)
-               VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8)
+              `INSERT INTO cash_drawer_days (location, pay_date, drawer_id, drawer_name, opening_cents, ending_cents, removed_cents, sessions, expected_close_cents)
+               VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9)
                ON CONFLICT (location, pay_date, drawer_id) DO UPDATE SET drawer_name = EXCLUDED.drawer_name,
                  opening_cents = EXCLUDED.opening_cents, ending_cents = EXCLUDED.ending_cents,
-                 removed_cents = EXCLUDED.removed_cents, sessions = EXCLUDED.sessions`,
-              [loc, day, drawerId, d.name, d.opening, d.ending, d.removed, d.sessions]
+                 removed_cents = EXCLUDED.removed_cents, sessions = EXCLUDED.sessions,
+                 expected_close_cents = EXCLUDED.expected_close_cents`,
+              [loc, day, drawerId, d.name, d.opening, d.ending, d.removed, d.sessions, d.expectedClose]
             );
           }
-          // A deposited day keeps its amounts.
+          // A deposited day keeps its amounts (only a missing Expected is filled in).
           await client.query(
-            `INSERT INTO cash_payments (location, pay_date, expected_cents, removed_cents) VALUES ($1, $2::date, $3, $4)
-             ON CONFLICT (location, pay_date) DO UPDATE SET expected_cents = EXCLUDED.expected_cents,
-               removed_cents = EXCLUDED.removed_cents, updated_at = NOW()
-             WHERE cash_payments.deposit_id IS NULL`,
-            [loc, day, expected, removed]
+            `INSERT INTO cash_payments (location, pay_date, expected_cents, removed_cents, pos_expected_cents) VALUES ($1, $2::date, $3, $4, $5)
+             ON CONFLICT (location, pay_date) DO UPDATE SET
+               expected_cents = CASE WHEN cash_payments.deposit_id IS NULL THEN EXCLUDED.expected_cents ELSE cash_payments.expected_cents END,
+               removed_cents = CASE WHEN cash_payments.deposit_id IS NULL THEN EXCLUDED.removed_cents ELSE cash_payments.removed_cents END,
+               pos_expected_cents = CASE WHEN cash_payments.deposit_id IS NULL OR cash_payments.pos_expected_cents IS NULL
+                                         THEN EXCLUDED.pos_expected_cents ELSE cash_payments.pos_expected_cents END,
+               updated_at = NOW()`,
+            [loc, day, expected, removed, posExpected]
           );
         }
         await client.query(
@@ -262,6 +294,7 @@ async function syncOnce() {
       client.release();
     }
   }
+  if (!backfillDone.rows.length) await markBackfill();
   return { fetchedDays };
 }
 
