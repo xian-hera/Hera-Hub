@@ -68,10 +68,52 @@ const NOTES = [
 
 const round5 = (c) => Math.round(c / 5) * 5;
 
-// Fake drawers of a location: 2–3 numbers, stable per location (e.g. 901, 902).
-function fakeDrawers(loc, index) {
+// Fake drawers of a location: 2–3 numbers, stable per location.
+// 2026-11-27 (Hera): the location's REAL drawer numbers from Shopify
+// (cashDrawers, scope read_cash_tracking — two-digit numbers such as 71, 72)
+// when Hub can read them; otherwise two-digit stand-ins (10, 11, …) instead of
+// the old 901, 902.
+function fakeDrawers(loc, index, real) {
+  const list = real && real.get(loc);
+  if (list && list.length) {
+    return list.map(d => ({ id: d.fullId || `test-${loc}-${d.id}`, name: d.name }));
+  }
   const n = 2 + (index % 2);
-  return Array.from({ length: n }, (_, i) => ({ id: `test-${loc}-${i + 1}`, name: String(900 + index * 3 + i + 1) }));
+  return Array.from({ length: n }, (_, i) => ({ id: `test-${loc}-${i + 1}`, name: String(10 + ((index * 3 + i) % 90)) }));
+}
+
+// Real cash drawers per location name (Map name → [{ id, name }], numbers
+// ascending), or null when Shopify can't be read (no session / no scope yet).
+const DRAWERS_Q = `query TestModeDrawers($after: String) {
+  cashDrawers(first: 100, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes { id name location { name } }
+  }
+}`;
+async function realDrawers() {
+  try {
+    const { gql } = require('./shopifyGql');
+    const out = new Map();
+    let after = null;
+    for (let page = 0; page < 20; page++) {
+      const d = await gql(DRAWERS_Q, { after });
+      const conn = d && d.cashDrawers;
+      if (!conn) break;
+      for (const x of conn.nodes || []) {
+        const loc = x.location && x.location.name;
+        if (!loc || !x.name) continue;
+        if (!out.has(loc)) out.set(loc, []);
+        out.get(loc).push({ id: String(x.id).split('/').pop(), name: String(x.name) });
+      }
+      if (!conn.pageInfo || !conn.pageInfo.hasNextPage) break;
+      after = conn.pageInfo.endCursor;
+    }
+    for (const list of out.values()) list.sort((a, b) => (Number(a.name) || 0) - (Number(b.name) || 0) || a.name.localeCompare(b.name));
+    return out;
+  } catch (e) {
+    console.warn('[cash-payments test mode] real drawers not readable, using stand-ins:', e.message);
+    return null;
+  }
 }
 
 // One fake day of one location. kind: 'filled' | 'pending'
@@ -122,10 +164,22 @@ async function insertDay(client, loc, day, f, depositId) {
   );
 }
 
-async function insertRows(client, locations, days, kindOf, depositedUntil) {
+// The drawers the fake data already uses, per location (Map name → [{ fullId, name }]).
+async function existingTestDrawers(db = pool) {
+  const r = await db.query(`SELECT DISTINCT location, drawer_id, drawer_name FROM cash_drawer_days WHERE is_test = TRUE`);
+  const out = new Map();
+  for (const x of r.rows) {
+    if (!out.has(x.location)) out.set(x.location, []);
+    out.get(x.location).push({ fullId: x.drawer_id, name: x.drawer_name });
+  }
+  for (const list of out.values()) list.sort((a, b) => (Number(a.name) || 0) - (Number(b.name) || 0) || a.name.localeCompare(b.name));
+  return out;
+}
+
+async function insertRows(client, locations, days, kindOf, depositedUntil, real = null) {
   const sorted = [...locations].sort();
   for (const [index, loc] of sorted.entries()) {
-    const drawers = fakeDrawers(loc, index);
+    const drawers = fakeDrawers(loc, index, real);
     let week = [];
     const flush = async () => {
       if (!week.length) return;
@@ -159,11 +213,12 @@ async function populate() {
   const pendingFrom = CP.addDays(yesterday, -(PENDING_DAYS - 1));
   const depositedUntil = CP.addDays(from, DEPOSITED_DAYS - 1);
   const locations = await CP.activeLocations();
+  const real = await realDrawers(); // before the transaction (Shopify call)
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     await clearTestRows(client);
-    await insertRows(client, locations, days, (d) => (d >= pendingFrom ? 'pending' : 'filled'), depositedUntil);
+    await insertRows(client, locations, days, (d) => (d >= pendingFrom ? 'pending' : 'filled'), depositedUntil, real);
     await writeState({ on: true, from }, client);
     await client.query('COMMIT');
   } catch (e) {
@@ -201,7 +256,8 @@ function maintain() {
           const client = await pool.connect();
           try {
             await client.query('BEGIN');
-            await insertRows(client, locations, days, () => 'pending', null);
+            // New days keep each location's drawers from the populated data.
+            await insertRows(client, locations, days, () => 'pending', null, await existingTestDrawers(client));
             await client.query('COMMIT');
           } catch (e) {
             await client.query('ROLLBACK').catch(() => {});

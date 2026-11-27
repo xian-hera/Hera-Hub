@@ -30,7 +30,7 @@ import {
 //     StoreCounted and Total Counted. Opened: the deposit note and its days.
 // (Replaces the 2026-11-20 deposit table + detail list.)
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 10; // days per page in Discrepancy (2026-11-27, Hera: was 50)
 
 // "Back to top" (2026-11-20, Hera): fixed at the top right of the screen,
 // outside the page width; shows once the page has been scrolled down.

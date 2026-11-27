@@ -180,9 +180,14 @@ function DayBlock({ row, mode, currentYear, check, onSaveAmount, notes }) {
   );
 }
 
-function HeaderRow({ check, mode }) {
+// Sticky (2026-11-27, Hera): stays at the top of the screen while the days
+// scroll under it; stickyTop leaves room for a sticky deposit card header.
+function HeaderRow({ check, mode, stickyTop = 0 }) {
   return (
-    <div style={{ ...OUTER(!!check), padding: '10px 0', borderBottom: '1px solid #e1e3e5', alignItems: 'center' }}>
+    <div style={{
+      ...OUTER(!!check), padding: '10px 0', borderBottom: '1px solid #e1e3e5', alignItems: 'center',
+      position: 'sticky', top: stickyTop, zIndex: 3, background: '#fff',
+    }}>
       {check && <div style={{ display: 'flex', justifyContent: 'center' }}>{check}</div>}
       <Head align="left"><span style={{ paddingLeft: 8 }}>Date</span></Head>
       <div style={{ display: 'grid', gridTemplateColumns: MAIN_COLS, alignItems: 'center', padding: '0 8px' }}>
@@ -207,7 +212,7 @@ const rowKey = (r) => `${r.location}|${r.date}`;
 
 // mode: 'collect' | 'audit' | 'deposit'. selectable(row) → can be ticked
 // (no checkboxes when not given).
-export function DayList({ rows, mode, currentYear, selectable, selected, onSelect, onSaveAmount, onSaveNote, emptyText }) {
+export function DayList({ rows, mode, currentYear, selectable, selected, onSelect, onSaveAmount, onSaveNote, emptyText, stickyTop = 0 }) {
   const notes = useRowNotes(onSaveNote);
   const withCheck = typeof selectable === 'function';
   const can = withCheck ? rows.filter(selectable) : [];
@@ -225,9 +230,10 @@ export function DayList({ rows, mode, currentYear, selectable, selected, onSelec
   };
   return (
     <>
-      <div style={{ overflowX: 'auto', padding: '0 12px' }}>
+      {/* No overflow box here (it would stop the sticky header); the blocks fit the page width. */}
+      <div style={{ padding: '0 12px' }}>
         <div style={{ minWidth: 890 }}>
-          <HeaderRow mode={mode} check={withCheck ? <Checkbox label="Select all" checked={allOn} indeterminate={selCount > 0 && !allOn} disabled={!can.length} onChange={toggleAll} /> : null} />
+          <HeaderRow mode={mode} stickyTop={stickyTop} check={withCheck ? <Checkbox label="Select all" checked={allOn} indeterminate={selCount > 0 && !allOn} disabled={!can.length} onChange={toggleAll} /> : null} />
           {rows.length === 0 && <div style={{ padding: '24px 8px', textAlign: 'center', color: SUBDUED, fontSize: 13 }}>{emptyText || 'Nothing to show.'}</div>}
           {rows.map(row => {
             const ok = withCheck && selectable(row);
@@ -278,6 +284,7 @@ export function daysSummary(dates) {
   }).join(', ');
 }
 
+const DEP_HEAD_H = 50; // deposit card header height (its day header sticks right under it)
 const SUM_PILL = { display: 'inline-block', padding: '2px 10px', borderRadius: 999, background: '#ebebeb', fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap' };
 
 function DaysLine({ dates }) {
@@ -301,13 +308,19 @@ export function DepositCard({ deposit, currentYear, open, onToggle, rows, loadin
     try { await onSaveDepositNote(d, ''); } catch (e) { window.alert(e.message); }
   };
   return (
-    <div style={{ background: '#fff', borderRadius: 12, boxShadow: '0 1px 0 rgba(0,0,0,0.07), 0 0 0 1px rgba(0,0,0,0.08)', overflow: 'hidden' }}>
+    <div style={{ background: '#fff', borderRadius: 12, boxShadow: '0 1px 0 rgba(0,0,0,0.07), 0 0 0 1px rgba(0,0,0,0.08)' }}>
       <div
         role="button"
         tabIndex={0}
         onClick={onToggle}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(); } }}
-        style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', cursor: 'pointer', borderBottom: open ? '1px solid #e1e3e5' : 'none', minWidth: 0 }}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', cursor: 'pointer', minWidth: 0,
+          borderBottom: open ? '1px solid #e1e3e5' : 'none', background: '#fff',
+          borderRadius: open ? '12px 12px 0 0' : 12, height: DEP_HEAD_H, boxSizing: 'border-box',
+          // sticky while its days scroll by (2026-11-27, Hera)
+          position: open ? 'sticky' : 'static', top: 0, zIndex: 4,
+        }}
       >
         <LocPill name={d.location} />
         <Tooltip content={d.title} preferredPosition="above">
@@ -349,7 +362,7 @@ export function DepositCard({ deposit, currentYear, open, onToggle, rows, loadin
           </div>
           {loading && !rows
             ? <div style={{ padding: 16, fontSize: 13, color: SUBDUED }}>Loading...</div>
-            : <DayList rows={rows || []} mode="deposit" currentYear={currentYear} onSaveNote={onSaveNote} emptyText="No days." />}
+            : <DayList rows={rows || []} mode="deposit" currentYear={currentYear} onSaveNote={onSaveNote} emptyText="No days." stickyTop={DEP_HEAD_H} />}
         </div>
       )}
       {editing && (

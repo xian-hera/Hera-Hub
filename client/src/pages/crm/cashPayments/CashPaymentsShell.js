@@ -117,6 +117,19 @@ export default function CashPaymentsShell({ tab = 'collect', children }) {
   const [error, setError] = useState('');
   const { names: mapNames, loading: mapLoading } = useLocationMap({ excludeHQ: true });
 
+  // Sticky headers (2026-11-27, Hera). public/index.html gives #root
+  // overflow-x: hidden, which (by the CSS rules) also makes #root a scroll box
+  // of its own — a position: sticky header inside it then never sticks, since
+  // the page scrolls in <body>. While Cash Payments is open, #root uses
+  // overflow-x: clip instead: same clipping, but no scroll box. Put back on leave.
+  useEffect(() => {
+    const root = document.getElementById('root');
+    if (!root) return undefined;
+    const before = root.style.overflowX;
+    root.style.overflowX = 'clip';
+    return () => { root.style.overflowX = before; };
+  }, []);
+
   const load = useCallback(async () => {
     setError('');
     try {
